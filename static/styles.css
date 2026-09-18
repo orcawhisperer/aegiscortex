@@ -133,7 +133,10 @@ button {
   background: var(--ink);
   color: var(--paper);
 }
-button:hover { background: var(--mark); border-color: var(--mark); }
+button:hover:not(.scenario-btn):not(.linkish) {
+  background: var(--mark);
+  border-color: var(--mark);
+}
 button.linkish {
   background: none;
   color: var(--mark);
@@ -204,8 +207,12 @@ textarea:focus-visible {
   padding: 0.72rem 0;
 }
 .scenario-btn:first-child { border-top: 0; }
-.scenario-btn:hover { color: var(--mark); }
-.scenario-btn.active { box-shadow: inset 3px 0 0 var(--mark); padding-left: 0.7rem; }
+.scenario-btn:hover { color: var(--mark); background: none; }
+.scenario-btn.active {
+  box-shadow: inset 3px 0 0 var(--mark);
+  padding-left: 0.7rem;
+  background: none;
+}
 .scenario-top { display: flex; justify-content: space-between; gap: 0.6rem; align-items: baseline; }
 .scenario-index {
   font-family: var(--mono);
