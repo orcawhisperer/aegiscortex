@@ -9,7 +9,7 @@ export default function Loading() {
       <header className="masthead">
         <div className="masthead-left">
           <h1>AegisCortex</h1>
-          <p className="standfirst">Reading the first case from Gin…</p>
+          <p className="standfirst">Reading the first ruling: block, repair, fast path, or auto-exec…</p>
         </div>
       </header>
       <section className="ledger" aria-hidden="true">

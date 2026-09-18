@@ -23,7 +23,7 @@ const mono = IBM_Plex_Mono({
 
 export const metadata = {
   title: "Aegis Speculative Control Plane · v1.0",
-  description: "Bind any schema. Repair one field. Calibrate τ. Control plane P50 114 ms.",
+  description: "Eleven cheap questions decide: block an attack, repair one field, serve the draft, or fire a tool — before a frontier model spends tokens.",
   icons: { icon: "/favicon.svg" },
 };
 

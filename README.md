@@ -94,7 +94,7 @@ Next.js rewrites `/svc/api/*` to `AEGIS_BACKEND_URL` / `AEGIS_ADDR` / `AEGIS_POR
 
 ## Studio
 
-`GET /` is `force-dynamic`. The server loads `GET /svc/api/boot?case=` so the first paint matches the permalink. Changing τ in the Gates sliders re-routes the last probabilities in the browser (0 ms). **Evaluate** is only needed when the payload or schema changes.
+`GET /` is `force-dynamic`. The server loads `GET /svc/api/boot?case=` so the first paint matches the permalink. The masthead dek, 60-second primer, anatomy strip, and per-case “What to watch” ribbon explain the four exhaustive outcomes (block → repair → fast path → auto-exec) without a modal. Changing τ in the Gates sliders moves a hairline across every P(yes) bar and re-routes at 0 ms. **Evaluate** is only needed when the payload or schema changes.
 
 Permalink query:
 
