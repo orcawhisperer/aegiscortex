@@ -48,7 +48,7 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation()")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("X-DNS-Prefetch-Control", "off")
 
@@ -75,6 +75,10 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(embeddedAssets)))
+
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, embeddedAssets, "static/favicon.svg")
+	})
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
