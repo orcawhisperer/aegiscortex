@@ -1,4 +1,5 @@
 const path = require("path");
+const { localBackendOrigin } = require("./lib/backend-origin.cjs");
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
@@ -7,10 +8,11 @@ const nextConfig = {
   },
   async rewrites() {
     if (process.env.VERCEL) return [];
+    const origin = localBackendOrigin();
     return [
       {
         source: "/svc/api/:path*",
-        destination: "http://127.0.0.1:8090/svc/api/:path*",
+        destination: `${origin}/svc/api/:path*`,
       },
     ];
   },

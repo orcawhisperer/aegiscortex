@@ -62,6 +62,7 @@ func statusHandler(engine *aegis.CortexEngine) gin.HandlerFunc {
 			"status":      "ok",
 			"has_api_key": engine.HasAPIKey(),
 			"hosted":      aegis.HostedOnVercel(),
+			"listen":      aegis.ResolvedListen(),
 			"timestamp":   time.Now().UTC().Format(time.RFC3339),
 		})
 	}
