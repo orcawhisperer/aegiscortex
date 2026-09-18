@@ -228,15 +228,38 @@ func TestInspectStateHallucination(t *testing.T) {
 func TestListenAddrLocalAndVercel(t *testing.T) {
 	t.Setenv("VERCEL", "")
 	t.Setenv("VERCEL_ENV", "")
+	t.Setenv("VERCEL_URL", "")
+	t.Setenv("VERCEL_REGION", "")
 	t.Setenv("AEGIS_ADDR", "")
+	t.Setenv("AEGIS_PORT", "")
+	t.Setenv("PORT", "")
 	addr, err := ListenAddr()
 	if err != nil || addr != defaultBindAddr {
 		t.Fatalf("default addr = %q %v", addr, err)
 	}
 
+	t.Setenv("AEGIS_PORT", "9100")
+	addr, err = ListenAddr()
+	if err != nil || addr != "127.0.0.1:9100" {
+		t.Fatalf("AEGIS_PORT addr = %q %v", addr, err)
+	}
+
+	t.Setenv("AEGIS_ADDR", "127.0.0.1:9200")
+	addr, err = ListenAddr()
+	if err != nil || addr != "127.0.0.1:9200" {
+		t.Fatalf("AEGIS_ADDR addr = %q %v", addr, err)
+	}
+
 	t.Setenv("AEGIS_ADDR", "0.0.0.0:8090")
 	if _, err := ListenAddr(); err == nil {
 		t.Fatal("expected loopback policy to reject 0.0.0.0")
+	}
+	t.Setenv("AEGIS_ADDR", "")
+
+	t.Setenv("PORT", "8080")
+	addr, err = ListenAddr()
+	if err != nil || addr != ":8080" {
+		t.Fatalf("PORT addr = %q %v", addr, err)
 	}
 
 	t.Setenv("VERCEL", "1")
@@ -244,6 +267,12 @@ func TestListenAddrLocalAndVercel(t *testing.T) {
 	addr, err = ListenAddr()
 	if err != nil || addr != ":8080" {
 		t.Fatalf("vercel addr = %q %v", addr, err)
+	}
+
+	t.Setenv("PORT", "")
+	addr, err = ListenAddr()
+	if err != nil || addr != ":3001" {
+		t.Fatalf("hosted without PORT = %q %v", addr, err)
 	}
 }
 

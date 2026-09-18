@@ -22,13 +22,13 @@ func TestRegisterRoutesDoesNotPanicAndServesStatus(t *testing.T) {
 
 	status := httptest.NewRecorder()
 	router.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/svc/api/status", nil))
-	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"status":"ok"`) {
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"status":"ok"`) || !strings.Contains(status.Body.String(), `"listen"`) {
 		t.Fatalf("status = %d %s", status.Code, status.Body.String())
 	}
 
 	state := httptest.NewRecorder()
 	router.ServeHTTP(state, httptest.NewRequest(http.MethodGet, "/svc/api/state", nil))
-	if state.Code != http.StatusOK || !strings.Contains(state.Body.String(), "rag_verified_fastpath") {
+	if state.Code != http.StatusOK || !strings.Contains(state.Body.String(), "rag_verified_fastpath") || !strings.Contains(state.Body.String(), `"listen"`) {
 		t.Fatalf("state = %d %s", state.Code, state.Body.String())
 	}
 }

@@ -211,7 +211,7 @@ export default function Studio({ boot }) {
       <p className="folio">
         <span>{hosted ? "Vercel edition" : "Loopback edition"}</span>
         <span>TypeSafe Jev-1.13 · Next.js + Gin</span>
-        <span>{hosted ? "Fluid Compute" : "127.0.0.1:8090"}</span>
+        <span>{hosted ? "Fluid Compute" : initial?.listen || "loopback"}</span>
       </p>
 
       <header className="masthead">

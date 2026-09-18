@@ -1,11 +1,11 @@
-const LOCAL_BACKEND = "http://127.0.0.1:8090";
+import { backendOrigin as resolveBackendOrigin } from "./backend-origin.cjs";
 
 export function backendOrigin() {
-  return (
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.AEGIS_BACKEND_URL ||
-    LOCAL_BACKEND
-  );
+  const origin = resolveBackendOrigin();
+  if (!origin) {
+    throw new Error("BACKEND_INTERNAL_URL is required on Vercel (service binding)");
+  }
+  return origin;
 }
 
 export function backendURL(path) {

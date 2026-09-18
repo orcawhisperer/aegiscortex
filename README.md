@@ -39,7 +39,7 @@ go test ./...
 go run ./cmd/api
 ```
 
-Frontend (proxies `/svc/api` to `127.0.0.1:8090` when not on Vercel):
+Frontend (proxies `/svc/api` to `AEGIS_BACKEND_URL` / `AEGIS_ADDR` / `AEGIS_PORT`, default `127.0.0.1:8090`, when not on Vercel):
 
 ```bash
 cd frontend
@@ -55,7 +55,7 @@ Or both via Vercel:
 npx vercel dev
 ```
 
-Live Jev (optional): set `TYPESAFE_API_KEY` on the backend process. Local bind stays loopback (`AEGIS_ADDR` defaults to `127.0.0.1:8090`). On Vercel the Gin service listens on `PORT`.
+Live Jev (optional): set `TYPESAFE_API_KEY` on the backend process. Listen address is **not** hardcoded: Vercel sets `PORT` and Gin binds `:$PORT`. Locally, `AEGIS_ADDR` or `AEGIS_PORT` override the `127.0.0.1:8090` fallback. Next.js SSR uses `BACKEND_INTERNAL_URL` on Vercel (service binding) and `AEGIS_BACKEND_URL` locally.
 
 ## Deploy on Vercel
 
