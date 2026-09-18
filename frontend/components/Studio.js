@@ -48,6 +48,17 @@ function Table({ caption, headers, rows, rowClasses, onRowClick }) {
             key={i}
             className={rowClasses?.[i] || ""}
             onClick={onRowClick ? () => onRowClick(i) : undefined}
+            onKeyDown={
+              onRowClick
+                ? (ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      onRowClick(i);
+                    }
+                  }
+                : undefined
+            }
+            tabIndex={onRowClick ? 0 : undefined}
             style={onRowClick ? { cursor: "pointer" } : undefined}
           >
             {cells.map((c, j) => (
@@ -473,6 +484,7 @@ export default function Studio({ boot, permalink }) {
                 const file = e.target.files?.[0];
                 if (!file) return;
                 runBacktest(await file.text(), 0);
+                e.target.value = "";
               }} />
             </label>
           </div>

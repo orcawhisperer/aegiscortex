@@ -1,6 +1,9 @@
 package aegiscortex
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 func isCanonicalExtractionKey(name string) bool {
 	n := strings.ToLower(name)
@@ -25,16 +28,21 @@ func InferExtraFields(state any) []CompiledField {
 	if len(ext) == 0 {
 		return nil
 	}
-	out := make([]CompiledField, 0, 4)
-	for name, val := range ext {
+	names := make([]string, 0, len(ext))
+	for name := range ext {
 		if isCanonicalExtractionKey(name) {
 			continue
 		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]CompiledField, 0, len(names))
+	for _, name := range names {
 		out = append(out, CompiledField{
 			Name:        name,
 			JSONPath:    name,
 			QuestionKey: fieldQuestionKey(name),
-			Type:        inferJSONType(val),
+			Type:        inferJSONType(ext[name]),
 		})
 		if len(out) >= 8 {
 			break

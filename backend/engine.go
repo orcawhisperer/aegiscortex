@@ -591,14 +591,16 @@ func (e *CortexEngine) recordOutcome(o EvaluationOutcome, resp *typesafe.SystemO
 		}
 	}
 
-	// Recommend slightly conservative gates from observed traffic.
-	if e.metrics.GuardrailsBlocked > 0 {
-		e.metrics.RecommendedBlockProb = round3(clamp(e.thresholds.GuardrailBlockProb*0.98+0.02, 0.50, 0.92))
-	}
-	if e.metrics.FastPathApproved > 0 {
-		e.metrics.RecommendedActGate = round3(clamp(e.thresholds.ChoiceActConfidence, 0.70, 0.95))
-		e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin, 0.70, 0.95))
-		e.metrics.RecommendedComposite = round3(clamp(e.thresholds.CompositePassScore, 50, 90))
+	// Heuristic flywheel must not clobber a solver-produced τ vector.
+	if e.lastSolve.Samples == 0 {
+		if e.metrics.GuardrailsBlocked > 0 {
+			e.metrics.RecommendedBlockProb = round3(clamp(e.thresholds.GuardrailBlockProb*0.98+0.02, 0.50, 0.92))
+		}
+		if e.metrics.FastPathApproved > 0 {
+			e.metrics.RecommendedActGate = round3(clamp(e.thresholds.ChoiceActConfidence, 0.70, 0.95))
+			e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin, 0.70, 0.95))
+			e.metrics.RecommendedComposite = round3(clamp(e.thresholds.CompositePassScore, 50, 90))
+		}
 	}
 	e.history = append([]EvaluationOutcome{o}, e.history...)
 	if len(e.history) > historyLimit {
