@@ -15,6 +15,14 @@ assert.equal(
   needleForRow("verify_field_invoice_date", [{ key: "notice_deadline_date", needle: "09/15/2026" }], '{"d":"09/15/2026"}'),
   "09/15/2026"
 );
+assert.equal(
+  needleForRow(
+    "vendor_or_entity_id",
+    [],
+    JSON.stringify({ mini_model_extraction: { vendor_name: "Northwind Analytics LLC" } })
+  ),
+  "Northwind Analytics LLC"
+);
 
 const parsed = parseStudioParams({
   case: "sde_hallucinated_date",

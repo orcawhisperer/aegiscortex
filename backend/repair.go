@@ -107,6 +107,9 @@ func buildSurgicalPatch(state any, failed []string, fieldViews []FieldVerificati
 		if _, ok := repaired[name]; ok {
 			continue
 		}
+		if patchCovers(patches, name) {
+			continue
+		}
 		after, method, evidence := repairField(source, locked, name, nil)
 		if method == "unresolved" && after == nil {
 			continue
@@ -175,6 +178,20 @@ func microRepairPrompt(source string, failed []string, patches []FieldPatch) str
 		target = patches[0].Field
 	}
 	return fmt.Sprintf("Given %q, compute only %s. Do not regenerate locked fields.", clip, target)
+}
+
+func patchCovers(patches []FieldPatch, name string) bool {
+	nl := strings.ToLower(name)
+	for _, p := range patches {
+		pl := strings.ToLower(p.Field)
+		if pl == nl || strings.Contains(pl, nl) || strings.Contains(nl, pl) {
+			return true
+		}
+		if containsAny(nl, "date", "notice", "deadline") && containsAny(pl, "date", "notice", "deadline") {
+			return true
+		}
+	}
+	return false
 }
 
 func failedMatches(failed []string, key string) bool {

@@ -350,6 +350,51 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 	}
 }
 
+func extractionNeedle(ext map[string]any, fieldName string) string {
+	if v := stringify(firstValue(ext, fieldName)); v != "" {
+		return v
+	}
+	fl := strings.ToLower(fieldName)
+	preferNotice := containsAny(fl, "notice", "deadline")
+	var notice, other string
+	remember := func(kl, s string) {
+		if s == "" {
+			return
+		}
+		if containsAny(kl, "notice", "deadline") {
+			notice = s
+			return
+		}
+		if other == "" {
+			other = s
+		}
+	}
+	for k, v := range ext {
+		kl := strings.ToLower(k)
+		s := stringify(v)
+		if kl == fl || strings.Contains(fl, kl) || strings.Contains(kl, fl) {
+			remember(kl, s)
+			continue
+		}
+		if containsAny(fl, "vendor", "entity") && containsAny(kl, "vendor", "entity", "party") {
+			remember(kl, s)
+		}
+		if containsAny(fl, "amount", "value", "monetary") && containsAny(kl, "amount", "value") {
+			remember(kl, s)
+		}
+		if containsAny(fl, "date", "notice", "deadline") && containsAny(kl, "date", "notice", "deadline") {
+			remember(kl, s)
+		}
+	}
+	if preferNotice && notice != "" {
+		return notice
+	}
+	if notice != "" {
+		return notice
+	}
+	return other
+}
+
 func scorerName(mode string) string {
 	if mode == "live_api" {
 		return "typesafe_jev"
@@ -379,11 +424,9 @@ func evidenceSpans(state any, fields []FieldVerificationView, questions []Questi
 	}
 	ext := extractionObject(state)
 	for _, f := range fields {
-		if f.Verified {
-			continue
-		}
-		if v := stringify(firstValue(ext, f.FieldName)); v != "" {
+		if v := extractionNeedle(ext, f.FieldName); v != "" {
 			add(f.FieldName, v)
+			add(f.QuestionID, v)
 		}
 	}
 	if notice := stringify(firstValue(ext, "notice_deadline_date")); notice != "" {
