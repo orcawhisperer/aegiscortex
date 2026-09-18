@@ -118,9 +118,14 @@ type CortexEngine struct {
 	mu         sync.RWMutex
 	apiKey     string
 	baseURL    string
+	client     *typesafe.Client
+	clientKey  string
 	thresholds GateThresholds
 	history    []EvaluationOutcome
 	metrics    FlywheelMetrics
+	labels     []LabeledTurn
+	lastSolve  SolvedGates
+	limiter    *ipLimiter
 }
 
 // NewCortexEngine initializes the engine from TYPESAFE_API_KEY / TYPESAFE_BASE_URL.
@@ -134,6 +139,7 @@ func NewCortexEngine() *CortexEngine {
 		apiKey:     envKey,
 		baseURL:    envURL,
 		thresholds: DefaultGateThresholds(),
+		limiter:    newIPLimiter(),
 		metrics: FlywheelMetrics{
 			ExpectedCalibrationECE: 0.018,
 			RecommendedActGate:     0.80,
@@ -148,7 +154,43 @@ func NewCortexEngine() *CortexEngine {
 func (e *CortexEngine) SetAPIKey(key string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.apiKey = strings.TrimSpace(key)
+	key = strings.TrimSpace(key)
+	if key == e.apiKey {
+		return
+	}
+	e.apiKey = key
+	if e.client != nil {
+		e.client.Close()
+		e.client = nil
+		e.clientKey = ""
+	}
+}
+
+func (e *CortexEngine) acquireLiveClient() (*typesafe.Client, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.apiKey == "" {
+		return nil, nil
+	}
+	if e.client != nil && e.clientKey == e.apiKey {
+		return e.client, nil
+	}
+	if e.client != nil {
+		e.client.Close()
+		e.client = nil
+	}
+	client, err := typesafe.NewClient(
+		typesafe.WithAPIKey(e.apiKey),
+		typesafe.WithBaseURL(e.baseURL),
+		typesafe.WithTimeout(20*time.Second),
+		typesafe.WithDefaultModel(typesafe.ModelJev1_13_0),
+	)
+	if err != nil {
+		return nil, err
+	}
+	e.client = client
+	e.clientKey = e.apiKey
+	return client, nil
 }
 
 // HasLiveKey reports whether a non-empty API key is configured in memory.
@@ -174,7 +216,7 @@ func (e *CortexEngine) UpdateThresholds(t GateThresholds) GateThresholds {
 	if t.CascadeVerifyMin > 0 && t.CascadeVerifyMin <= 1 {
 		e.thresholds.CascadeVerifyMin = t.CascadeVerifyMin
 	}
-	if t.CompositePassScore >= 0 && t.CompositePassScore <= 100 {
+	if t.CompositePassScore >= 30 && t.CompositePassScore <= 100 {
 		e.thresholds.CompositePassScore = t.CompositePassScore
 	}
 	return e.thresholds
@@ -200,16 +242,48 @@ func (e *CortexEngine) snapshotMetrics() FlywheelMetrics {
 	return e.metrics
 }
 
+func (e *CortexEngine) snapshotSolve() SolvedGates {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastSolve
+}
+
+func (e *CortexEngine) AllowEvaluate(ip string) bool {
+	if !e.HasLiveKey() {
+		return true
+	}
+	if e.limiter == nil {
+		return true
+	}
+	return e.limiter.allow(ip, 20, time.Minute)
+}
+
+type evaluateOpts struct {
+	Pipeline     PipelineID
+	State        any
+	PreferLive   bool
+	Schema       map[string]any
+	Thresholds   *GateThresholds
+	ReadOnly     bool
+	ScenarioID   string
+	ExpectedTier string
+}
+
 // Evaluate runs the 11-question fan-out. Live API is used when a key is present;
 // failures are recorded and the calibrated simulator is used instead.
 func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state any, preferLive bool) (*EvaluationOutcome, error) {
+	return e.evaluate(ctx, evaluateOpts{Pipeline: pipeline, State: state, PreferLive: preferLive})
+}
+
+func (e *CortexEngine) evaluate(ctx context.Context, opts evaluateOpts) (*EvaluationOutcome, error) {
 	e.mu.RLock()
-	apiKey := e.apiKey
-	baseURL := e.baseURL
 	thresh := e.thresholds
 	e.mu.RUnlock()
+	if opts.Thresholds != nil {
+		thresh = *opts.Thresholds
+	}
 
-	questions, specs := BuildPipelineQuestions(pipeline)
+	questions, specs := BuildQuestions(opts.Pipeline, opts.Schema)
 	start := time.Now()
 
 	var sdkResp *typesafe.SystemOneResponse
@@ -217,20 +291,13 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 	fallback := false
 	liveErr := ""
 
-	if preferLive && apiKey != "" {
-		client, err := typesafe.NewClient(
-			typesafe.WithAPIKey(apiKey),
-			typesafe.WithBaseURL(baseURL),
-			typesafe.WithTimeout(20*time.Second),
-			typesafe.WithDefaultModel(typesafe.ModelJev1_13_0),
-		)
-		if err != nil {
+	if opts.PreferLive {
+		if client, err := e.acquireLiveClient(); err != nil {
 			fallback = true
 			liveErr = sanitizeLiveError(err)
-		} else {
-			defer client.Close()
+		} else if client != nil {
 			liveResp, callErr := client.SystemOne(ctx, typesafe.SystemOneRequest{
-				State:     state,
+				State:     opts.State,
 				Questions: questions,
 				Model:     typesafe.ModelJev1_13_0,
 			})
@@ -245,7 +312,7 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 	}
 
 	if sdkResp == nil {
-		sdkResp = simulateCalibratedJevResponse(pipeline, state)
+		sdkResp = simulateCalibratedJevResponse(opts.Pipeline, opts.State, specs)
 	}
 
 	elapsedMs := time.Since(start).Milliseconds()
@@ -261,12 +328,7 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 		{Name: qCredentialPII, Weight: 0.15},
 		{Name: qHarmSeverity, Weight: 0.15, MaxScore: 2.0},
 	})
-	trustComp, trustErr := typesafe.ComputeCompositeScore(sdkResp, []typesafe.ScoreDimension{
-		{Name: qFieldVendor, Weight: 0.25},
-		{Name: qFieldAmount, Weight: 0.25},
-		{Name: qFieldDate, Weight: 0.25},
-		{Name: qFieldClaim, Weight: 0.25},
-	})
+	trustComp, trustErr := typesafe.ComputeCompositeScore(sdkResp, fieldTrustDimensions(specs))
 
 	compositeRisk := 0.0
 	if riskErr == nil && riskComp != nil {
@@ -311,7 +373,7 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 		LiveError:          liveErr,
 		Model:              sdkResp.Model,
 		RequestID:          sdkResp.RequestID,
-		Pipeline:           pipeline,
+		Pipeline:           opts.Pipeline,
 		FinalVerdict:       verdict,
 		VerdictSummary:     summary,
 		SelectedSkill:      skillChoice.Choice,
@@ -336,8 +398,32 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 		},
 	}
 
-	e.recordOutcome(outcome, sdkResp)
+	if !opts.ReadOnly {
+		e.recordOutcome(outcome, sdkResp)
+		if want := wantTierFor(opts.ScenarioID, opts.ExpectedTier); want != "" {
+			e.rememberTurn(labelFromOutcome(opts.ScenarioID, want, &outcome))
+			_, _ = e.solveAndRecommend(0.001)
+		}
+	}
 	return &outcome, nil
+}
+
+func fieldTrustDimensions(specs []BoundQuestionSpec) []typesafe.ScoreDimension {
+	keys := make([]string, 0, 4)
+	for _, spec := range specs {
+		if spec.Primitive == "noul" && isFieldQuestion(spec.Key) {
+			keys = append(keys, spec.Key)
+		}
+	}
+	if len(keys) == 0 {
+		keys = []string{qFieldVendor, qFieldAmount, qFieldDate, qFieldClaim}
+	}
+	w := 1.0 / float64(len(keys))
+	out := make([]typesafe.ScoreDimension, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, typesafe.ScoreDimension{Name: k, Weight: w})
+	}
+	return out
 }
 
 func buildItems(sdkResp *typesafe.SystemOneResponse, specs []BoundQuestionSpec, thresh GateThresholds) ([]QuestionEvaluationItem, []string, bool) {
@@ -396,6 +482,7 @@ func buildItems(sdkResp *typesafe.SystemOneResponse, specs []BoundQuestionSpec, 
 			item.NumericValue = round3(sAns.Score / 2.0)
 			item.Confidence = round3(sAns.Confidence)
 			item.Probabilities = sAns.Probabilities
+			item.SelectedLabel = scoreBandLabel(sAns.Score)
 			dec := typesafe.RouteScore(sAns, thresh.ChoiceActConfidence, thresh.ReviewMinConfidence)
 			item.GateAction = string(dec.Action)
 		}
@@ -516,13 +603,20 @@ func (e *CortexEngine) recordOutcome(o EvaluationOutcome, resp *typesafe.SystemO
 		e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin, 0.70, 0.95))
 		e.metrics.RecommendedComposite = round3(clamp(e.thresholds.CompositePassScore, 50, 90))
 	}
-	if e.metrics.HallucinationsCaught > 0 {
-		e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin+0.02, 0.70, 0.95))
-	}
-
 	e.history = append([]EvaluationOutcome{o}, e.history...)
 	if len(e.history) > historyLimit {
 		e.history = e.history[:historyLimit]
+	}
+}
+
+func scoreBandLabel(score float64) string {
+	switch {
+	case score < 0.67:
+		return "0: Negligible"
+	case score < 1.34:
+		return "1: Moderate"
+	default:
+		return "2: Severe"
 	}
 }
 

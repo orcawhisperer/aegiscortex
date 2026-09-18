@@ -107,9 +107,13 @@ h2 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
   margin: 0;
   font-family: var(--serif);
   font-size: 1.05rem;
+  padding: 0.2rem 0.55rem;
+  border: 2px solid currentColor;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .mode.live { color: var(--ok); }
-.mode.sim { color: var(--muted); }
+.mode.sim { color: var(--mark); }
 
 .key-form { display: flex; gap: 0.4rem; }
 
@@ -385,9 +389,27 @@ th {
 .sk-lg { height: 1.35rem; max-width: 11rem; margin: 0.25rem 0; }
 .sk-block { height: 3.2rem; max-width: none; margin: 0.55rem 0; }
 
+.patch {
+  margin: 1rem 0 0;
+  padding: 0.75rem 0.85rem 0.9rem;
+  border: 1px solid var(--ink);
+  background: var(--wash);
+}
+.patch pre {
+  margin: 0.4rem 0 0;
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.schema-box { min-height: 8.5rem; }
+.moat-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.4rem 0 0.2rem; }
+
 @media (max-width: 960px) {
   .folio { flex-wrap: wrap; }
   .ledger, .sheet { grid-template-columns: 1fr; }
+  .ledger div { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .ledger div:last-child { border-bottom: 0; }
   .sheet > aside { border-right: 0; border-bottom: 1px solid var(--ink); }
   .masthead { flex-direction: column; align-items: flex-start; }
   .masthead-right { align-items: flex-start; }

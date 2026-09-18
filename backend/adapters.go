@@ -25,8 +25,14 @@ type PipelineThresholds struct {
 
 // EvaluationRequest is POST /api/evaluate.
 type EvaluationRequest struct {
-	ScenarioID string         `json:"scenario_id"`
-	Context    map[string]any `json:"context"`
+	ScenarioID    string              `json:"scenario_id"`
+	Context       map[string]any      `json:"context"`
+	Schema        map[string]any      `json:"schema,omitempty"`
+	SchemaText    string              `json:"schema_text,omitempty"`
+	Thresholds    *PipelineThresholds `json:"thresholds,omitempty"`
+	ReadOnly      bool                `json:"read_only,omitempty"`
+	ExpectedTier  string              `json:"expected_tier,omitempty"`
+	MaxEscapeRate float64             `json:"max_escape_rate,omitempty"`
 }
 
 // FieldVerificationView is one card in the per-field gate.
@@ -113,6 +119,11 @@ type EvaluationResponse struct {
 	Questions          []QuestionView          `json:"questions"`
 	Flywheel           FlywheelTelemetryView   `json:"flywheel"`
 	History            []HistoryEntry          `json:"history"`
+	Surgical           *SurgicalPatch          `json:"surgical,omitempty"`
+	Calibration        *SolvedGates            `json:"calibration,omitempty"`
+	QuestionCount      int                     `json:"question_count"`
+	ReadOnly           bool                    `json:"read_only,omitempty"`
+	CompiledFields     []CompiledField         `json:"compiled_fields,omitempty"`
 }
 
 // NewCortexEngineWithKey constructs a CortexEngine and optionally sets a key.
@@ -216,15 +227,49 @@ func (e *CortexEngine) EvaluateRequest(ctx context.Context, req EvaluationReques
 		}
 	}
 
-	outcome, err := e.Evaluate(ctx, pipeline, statePayload, e.HasLiveKey())
+	schema := req.Schema
+	if schema == nil && strings.TrimSpace(req.SchemaText) != "" {
+		if compiled, err := CompileSchemaText(req.SchemaText); err == nil {
+			schema = map[string]any{"title": compiled.Title, "compiled_fields": compiled.Fields}
+			// Rebuild as a JSON Schema properties object so BuildQuestions can walk it.
+			props := map[string]any{}
+			for _, f := range compiled.Fields {
+				props[f.Name] = map[string]any{"type": f.Type}
+			}
+			schema = map[string]any{"title": compiled.Title, "type": "object", "properties": props}
+		}
+	}
+
+	var gates *GateThresholds
+	if req.Thresholds != nil {
+		g := GateThresholds{
+			GuardrailBlockProb:  req.Thresholds.SecurityGateConfidence,
+			CascadeVerifyMin:    req.Thresholds.FieldVerifyConfidence,
+			ChoiceActConfidence: req.Thresholds.RouterConfidence,
+			ReviewMinConfidence: 0.50,
+			CompositePassScore:  req.Thresholds.CompositePassThreshold,
+		}
+		gates = &g
+	}
+
+	outcome, err := e.evaluate(ctx, evaluateOpts{
+		Pipeline:     pipeline,
+		State:        statePayload,
+		PreferLive:   e.HasLiveKey() && !req.ReadOnly,
+		Schema:       schema,
+		Thresholds:   gates,
+		ReadOnly:     req.ReadOnly,
+		ScenarioID:   req.ScenarioID,
+		ExpectedTier: req.ExpectedTier,
+	})
 	if err != nil {
 		return EvaluationResponse{}, err
 	}
 
-	return e.projectResponse(req.ScenarioID, outcome), nil
+	return e.projectResponse(req.ScenarioID, outcome, req, schema, statePayload), nil
 }
 
-func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOutcome) EvaluationResponse {
+func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOutcome, req EvaluationRequest, schema map[string]any, state map[string]any) EvaluationResponse {
 	routeTier := routeTierFromVerdict(outcome.FinalVerdict)
 	fields := fieldViewsFromOutcome(outcome)
 	qViews := questionViewsFromOutcome(outcome)
@@ -232,6 +277,17 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 	modeStr := "CALIBRATED_JEV_SIMULATION"
 	if outcome.Mode == "live_api" {
 		modeStr = "LIVE_TYPESAFE_API"
+	}
+
+	var compiled []CompiledField
+	if schema != nil {
+		if c, err := CompileJSONSchema(schema); err == nil {
+			compiled = c.Fields
+		}
+	}
+	var calibration *SolvedGates
+	if solved := e.snapshotSolve(); solved.Samples > 0 {
+		calibration = &solved
 	}
 
 	return EvaluationResponse{
@@ -265,6 +321,11 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 		Questions:          qViews,
 		Flywheel:           e.GetFlywheel(),
 		History:            e.historyView(8),
+		Surgical:           buildSurgicalPatch(state, outcome.FailedFields, fields),
+		Calibration:        calibration,
+		QuestionCount:      len(qViews),
+		ReadOnly:           req.ReadOnly,
+		CompiledFields:     compiled,
 	}
 }
 

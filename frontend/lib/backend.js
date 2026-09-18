@@ -16,11 +16,16 @@ export function backendURL(path) {
 }
 
 export async function fetchBackend(path, init = {}) {
+  const method = (init.method || "GET").toUpperCase();
+  const timeoutMs = init.timeoutMs || (method === "POST" ? 25000 : 8000);
+  const { timeoutMs: _ignored, ...rest } = init;
   const res = await fetch(backendURL(path), {
-    ...init,
+    ...rest,
     cache: "no-store",
+    signal: init.signal || AbortSignal.timeout(timeoutMs),
     headers: {
       Accept: "application/json",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
       ...(init.headers || {}),
     },
   });
@@ -33,19 +38,8 @@ export async function fetchBackend(path, init = {}) {
 
 export async function loadStudioBoot() {
   try {
-    const state = await fetchBackend("/state");
-    const first =
-      (state.presets || []).find((p) => p.id === "rag_verified_fastpath") ||
-      (state.presets || [])[0];
-    if (!first) {
-      return { state, eval: null, error: null };
-    }
-    const evaluation = await fetchBackend("/evaluate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenario_id: first.id, context: first.context }),
-    });
-    return { state, eval: evaluation, error: null };
+    const boot = await fetchBackend("/boot");
+    return { state: boot.state || null, eval: boot.eval || null, error: null };
   } catch (err) {
     return { state: null, eval: null, error: err.message };
   }

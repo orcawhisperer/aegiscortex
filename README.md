@@ -4,6 +4,8 @@ Local studio for an **11-question speculative AI control plane** built on [`type
 
 It is a **loopback FinOps workbench**, not a production gateway. The calibrated simulator inspects the JSON payload you send. Route labels, field rows, and flywheel counters are computed from those answers — not from the scenario name.
 
+The studio’s moat is the control plane: bind an arbitrary JSON Schema into per-field `DefineNoul` questions on one `SystemOne` prefill, splice only the failed fields (surgical repair), and solve τ from labeled turns against a hallucination-escape SLA.
+
 Layout matches the [Next.js + Gin starter](https://vercel.com/templates/next.js/next-js-gin-starter): Next.js at `/`, Gin at `/svc/api`. The first ruling is rendered on the server (App Router, `force-dynamic`) via a private service binding; the browser then evaluates through `/svc/api`. Fonts are self-hosted with `next/font`.
 
 ```txt
@@ -85,9 +87,12 @@ Public routes:
 | :--- | :--- | :--- |
 | `GET` | `/svc/api/status` | Liveness |
 | `GET` | `/svc/api/state` | Presets, thresholds, flywheel |
-| `POST` | `/svc/api/evaluate` | `{ "scenario_id", "context" }` |
-| `POST` | `/svc/api/thresholds` | Slider gates |
-| `POST` | `/svc/api/key` | In-memory TypeSafe key (local only; 403 on Vercel) |
+| `GET` | `/svc/api/boot` | Read-only first ruling (does not mutate flywheel) |
+| `POST` | `/svc/api/evaluate` | `{ "scenario_id", "context", "schema?", "thresholds?" }` |
+| `POST` | `/svc/api/compile` | JSON Schema / TypeScript → BindQuestions matrix |
+| `POST` | `/svc/api/calibrate` | Pareto τ solver for a max escape rate |
+| `POST` | `/svc/api/thresholds` | Slider gates (evaluations also send τ inline) |
+| `POST` | `/svc/api/key` | In-memory TypeSafe key (loopback RemoteAddr only) |
 
 ## Production readiness
 

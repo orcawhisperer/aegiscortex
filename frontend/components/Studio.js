@@ -4,6 +4,18 @@ import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/svc/api";
 
+const DEFAULT_SCHEMA = `{
+  "title": "MSAExtraction",
+  "type": "object",
+  "properties": {
+    "vendor_name": { "type": "string" },
+    "contract_value_usd": { "type": "number" },
+    "effective_date": { "type": "string", "format": "date" },
+    "notice_deadline_date": { "type": "string", "format": "date" },
+    "auto_renews": { "type": "boolean" }
+  }
+}`;
+
 function tierClass(tier) {
   if (tier === "TIER_0_BLOCK") return "stamp tier-block";
   if (tier === "TIER_0_AUTO_EXEC") return "stamp tier-auto";
@@ -15,9 +27,10 @@ function money(n) {
   return `$${(n || 0).toFixed(6)}`;
 }
 
-function Table({ headers, rows, rowClasses }) {
+function Table({ caption, headers, rows, rowClasses }) {
   return (
     <table>
+      {caption ? <caption>{caption}</caption> : null}
       <thead>
         <tr>
           {headers.map((h) => (
@@ -38,13 +51,30 @@ function Table({ headers, rows, rowClasses }) {
   );
 }
 
-function firstPreset(presets) {
-  return (presets || []).find((p) => p.id === "rag_verified_fastpath") || (presets || [])[0];
+function firstPreset(presets, preferred) {
+  return (
+    (presets || []).find((p) => p.id === preferred) ||
+    (presets || []).find((p) => p.id === "rag_verified_fastpath") ||
+    (presets || [])[0]
+  );
+}
+
+function caseFromURL() {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("case") || "";
+}
+
+function writeCaseURL(id) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("case", id);
+  window.history.replaceState({}, "", url);
 }
 
 export default function Studio({ boot }) {
   const initial = boot?.state;
-  const first = firstPreset(initial?.presets);
+  const preferred = caseFromURL();
+  const first = firstPreset(initial?.presets, preferred);
   const [hosted, setHosted] = useState(Boolean(initial?.hosted));
   const [presets, setPresets] = useState(initial?.presets || []);
   const [activeId, setActiveId] = useState(first?.id || "rag_verified_fastpath");
@@ -70,12 +100,17 @@ export default function Studio({ boot }) {
   const [statusError, setStatusError] = useState(Boolean(boot?.error && !boot?.eval));
   const [keyValue, setKeyValue] = useState("");
   const [flywheel, setFlywheel] = useState(boot?.eval?.flywheel || initial?.flywheel || null);
+  const [schemaText, setSchemaText] = useState(DEFAULT_SCHEMA);
+  const [compiled, setCompiled] = useState(null);
+  const [useSchema, setUseSchema] = useState(false);
+  const [escapeRate, setEscapeRate] = useState(0.001);
   const thresholdTimer = useRef(null);
+  const evalAbort = useRef(null);
   const [pending, startTransition] = useTransition();
 
   const modeLabel = useMemo(() => {
     if (evalRes?.fallback_used) return "Live failed — simulator";
-    if (evalRes?.mode === "LIVE_TYPESAFE_API") return "Live API";
+    if (evalRes?.mode === "LIVE_TYPESAFE_API") return "Live Jev";
     return "Simulator";
   }, [evalRes]);
 
@@ -90,14 +125,30 @@ export default function Studio({ boot }) {
       setStatus("Invalid JSON: " + e.message);
       return;
     }
+    if (evalAbort.current) evalAbort.current.abort();
+    const controller = new AbortController();
+    evalAbort.current = controller;
     setStatusError(false);
-    setStatus("Running 11-question fan-out…");
+    setStatus("Running speculative fan-out…");
     try {
+      const body = {
+        scenario_id: scenarioId,
+        context: parsed,
+        thresholds,
+      };
+      if (useSchema) {
+        try {
+          body.schema = JSON.parse(schemaText);
+        } catch {
+          body.schema_text = schemaText;
+        }
+      }
       const r = await fetch(`${BACKEND}/evaluate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scenario_id: scenarioId, context: parsed }),
+        body: JSON.stringify(body),
         cache: "no-store",
+        signal: controller.signal,
       });
       const data = await r.json();
       if (!r.ok) {
@@ -110,17 +161,28 @@ export default function Studio({ boot }) {
         if (data.flywheel) setFlywheel(data.flywheel);
       });
       setStatus(
-        `Route ${data.final_route_tier} in ${data.latency_ms.toFixed(0)} ms · ${data.questions.length} questions · savings ${data.cascade.cost_savings_percent.toFixed(1)}%`
+        `Route ${data.final_route_tier} in ${data.latency_ms.toFixed(0)} ms · ${data.question_count || data.questions.length} questions · savings ${data.cascade.cost_savings_percent.toFixed(1)}%`
       );
       if (data.live_error) {
         setStatusError(true);
         setStatus("Live API error, using simulator: " + data.live_error);
       }
     } catch (e) {
+      if (e.name === "AbortError") return;
       setStatusError(true);
       setStatus("Evaluation failed: " + e.message);
     }
-  }, []);
+  }, [schemaText, thresholds, useSchema]);
+
+  useEffect(() => {
+    if (boot?.state && preferred) {
+      const preset = firstPreset(boot.state.presets, preferred);
+      if (preset && preset.id !== activeId) {
+        setActiveId(preset.id);
+        setContextJSON(JSON.stringify(preset.context, null, 2));
+      }
+    }
+  }, [boot, preferred, activeId]);
 
   useEffect(() => {
     if (boot?.state) return undefined;
@@ -134,11 +196,12 @@ export default function Studio({ boot }) {
         setPresets(state.presets || []);
         if (state.thresholds) setThresholds(state.thresholds);
         setFlywheel(state.flywheel || null);
-        const preset = firstPreset(state.presets);
+        const preset = firstPreset(state.presets, caseFromURL());
         if (preset) {
           setActiveId(preset.id);
           const raw = JSON.stringify(preset.context, null, 2);
           setContextJSON(raw);
+          writeCaseURL(preset.id);
           await evaluate(preset.id, raw);
         }
         setStatus("Ready. Routing is computed from the payload, not from the case name.");
@@ -152,16 +215,29 @@ export default function Studio({ boot }) {
     })();
     return () => {
       cancelled = true;
+      if (evalAbort.current) evalAbort.current.abort();
     };
-  }, [boot, evaluate]);
+    // CSR recovery runs once when SSR boot failed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boot]);
 
   async function persistThresholds(next) {
     setThresholds(next);
-    await fetch(`${BACKEND}/thresholds`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(next),
-    });
+    try {
+      const r = await fetch(`${BACKEND}/thresholds`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        setStatusError(true);
+        setStatus(data.error || "Could not persist gates; evaluating with inline τ");
+      }
+    } catch (e) {
+      setStatusError(true);
+      setStatus("Gate persist failed: " + e.message);
+    }
     await evaluate(activeId, contextJSON);
   }
 
@@ -169,7 +245,19 @@ export default function Studio({ boot }) {
     setActiveId(preset.id);
     const raw = JSON.stringify(preset.context, null, 2);
     setContextJSON(raw);
+    writeCaseURL(preset.id);
     evaluate(preset.id, raw);
+  }
+
+  function onCaseKey(ev, index) {
+    if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp") return;
+    ev.preventDefault();
+    const next = ev.key === "ArrowDown" ? Math.min(presets.length - 1, index + 1) : Math.max(0, index - 1);
+    const preset = presets[next];
+    if (preset) {
+      selectCase(preset);
+      ev.currentTarget.parentElement?.querySelectorAll("[role=radio]")[next]?.focus();
+    }
   }
 
   async function holdKey(ev) {
@@ -201,10 +289,59 @@ export default function Studio({ boot }) {
     });
   }
 
+  async function compileSchema() {
+    try {
+      const r = await fetch(`${BACKEND}/compile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schema_text: schemaText }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setStatusError(true);
+        setStatus(data.error || "Schema compile failed");
+        return;
+      }
+      setCompiled(data);
+      setUseSchema(true);
+      setStatusError(false);
+      setStatus(`Bound ${data.fields?.length || 0} field nouls · ${data.question_count} questions in one SystemOne pass.`);
+    } catch (e) {
+      setStatusError(true);
+      setStatus("Schema compile failed: " + e.message);
+    }
+  }
+
+  async function solveTau() {
+    try {
+      const r = await fetch(`${BACKEND}/calibrate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_escape_rate: escapeRate }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setStatusError(true);
+        setStatus(data.error || "Need labeled runs before solving τ");
+        return;
+      }
+      persistThresholds(data.thresholds);
+      setStatusError(false);
+      setStatus(
+        `Solved τ for ${(data.max_escape_rate * 100).toFixed(2)}% escape SLA · match ${(data.match_rate * 100).toFixed(0)}% on ${data.samples} labeled turns.`
+      );
+    } catch (e) {
+      setStatusError(true);
+      setStatus("Calibrate failed: " + e.message);
+    }
+  }
+
   const cascade = evalRes?.cascade;
   const fields = evalRes?.field_verifications || [];
   const questions = evalRes?.questions || [];
   const history = evalRes?.history || [];
+  const surgical = evalRes?.surgical;
+  const calibration = evalRes?.calibration;
 
   return (
     <div className={pending ? "pending" : ""} aria-busy={pending}>
@@ -217,10 +354,12 @@ export default function Studio({ boot }) {
       <header className="masthead">
         <div className="masthead-left">
           <h1>AegisCortex</h1>
-          <p className="standfirst">Eleven questions. One route. Costs modeled, not spent.</p>
+          <p className="standfirst">Bind any schema. Repair one field. Calibrate τ.</p>
         </div>
         <div className="masthead-right">
-          <p className={live ? "mode live" : "mode sim"}>{modeLabel}</p>
+          <p className={live ? "mode live" : "mode sim"} aria-live="polite">
+            {modeLabel}
+          </p>
           {hosted ? (
             <p className="note">
               Live Jev uses the server <code>TYPESAFE_API_KEY</code> env var.
@@ -247,22 +386,22 @@ export default function Studio({ boot }) {
       <section className="ledger" aria-label="Run figures">
         <div>
           <span>Latency</span>
-          <strong>{evalRes ? `${evalRes.latency_ms.toFixed(0)} ms` : "—"}</strong>
+          <strong>{evalRes ? `${evalRes.latency_ms.toFixed(0)} ms` : <span className="sk-lg" />}</strong>
           <em>Jev P50 {cascade ? `${cascade.reference_jev_p50_ms.toFixed(0)} ms` : "114 ms"}</em>
         </div>
         <div>
           <span>Fan-out</span>
-          <strong>{cascade ? money(cascade.aegis_control_cost_usd) : "—"}</strong>
-          <em>$0.042 / 1M in</em>
+          <strong>{cascade ? money(cascade.aegis_control_cost_usd) : <span className="sk-lg" />}</strong>
+          <em>{evalRes ? `${evalRes.question_count || questions.length} heads` : "$0.042 / 1M in"}</em>
         </div>
         <div>
           <span>Saved vs frontier</span>
-          <strong>{cascade ? `${cascade.cost_savings_percent.toFixed(1)}%` : "—"}</strong>
+          <strong>{cascade ? `${cascade.cost_savings_percent.toFixed(1)}%` : <span className="sk-lg" />}</strong>
           <em>baseline {cascade ? `$${cascade.naive_frontier_cost_usd.toFixed(5)}` : "—"}</em>
         </div>
         <div>
           <span>Trust</span>
-          <strong>{evalRes ? evalRes.composite_score.toFixed(1) : "—"}</strong>
+          <strong>{evalRes ? evalRes.composite_score.toFixed(1) : <span className="sk-lg" />}</strong>
           <em>{evalRes?.final_route_tier || "—"}</em>
         </div>
         <div>
@@ -284,8 +423,10 @@ export default function Studio({ boot }) {
                 type="button"
                 role="radio"
                 aria-checked={p.id === activeId}
+                tabIndex={p.id === activeId ? 0 : -1}
                 className={p.id === activeId ? "scenario-btn active" : "scenario-btn"}
                 onClick={() => selectCase(p)}
+                onKeyDown={(ev) => onCaseKey(ev, i)}
               >
                 <div className="scenario-top">
                   <span className="scenario-title">
@@ -327,11 +468,65 @@ export default function Studio({ boot }) {
                 />
               </label>
             ))}
+            <label>
+              Max escape <b>{(escapeRate * 100).toFixed(2)}%</b>
+              <input
+                type="range"
+                min={0.001}
+                max={0.05}
+                step={0.001}
+                value={escapeRate}
+                onChange={(e) => setEscapeRate(parseFloat(e.target.value))}
+              />
+            </label>
+          </div>
+          <div className="moat-actions">
+            <button type="button" onClick={solveTau}>
+              Solve τ
+            </button>
           </div>
           <p className="note">
             {flywheel
               ? `τ  sec=${flywheel.recommended_block_prob.toFixed(2)}  field=${flywheel.recommended_verify_min.toFixed(2)}  route=${flywheel.recommended_act_gate.toFixed(2)}  composite=${flywheel.recommended_composite.toFixed(0)}  ECE=${flywheel.expected_calibration_ece.toFixed(3)}`
               : ""}
+            {calibration?.samples
+              ? ` · solver ${calibration.samples} labels, escape ${(calibration.escape_rate * 100).toFixed(2)}%`
+              : ""}
+          </p>
+
+          <h2>Schema</h2>
+          <p className="note">
+            Paste JSON Schema or a TypeScript interface. Each leaf becomes a field noul on the same prefill.
+          </p>
+          <label className="sr-only" htmlFor="schema-editor">
+            JSON Schema or TypeScript interface
+          </label>
+          <textarea
+            id="schema-editor"
+            className="schema-box"
+            spellCheck={false}
+            value={schemaText}
+            onChange={(e) => setSchemaText(e.target.value)}
+          />
+          <div className="moat-actions">
+            <button type="button" onClick={compileSchema}>
+              Bind schema
+            </button>
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                setUseSchema(false);
+                setCompiled(null);
+              }}
+            >
+              Use default 4 fields
+            </button>
+          </div>
+          <p className="note">
+            {useSchema && compiled
+              ? `${compiled.fields?.length || 0} compiled fields · ${compiled.question_count} questions`
+              : "Default four field nouls (vendor, amount, date, claim)."}
           </p>
 
           <div className="run-row">
@@ -376,7 +571,11 @@ export default function Studio({ boot }) {
           </p>
 
           <table className="compare">
-            <caption>Modeled spend — no downstream model is called</caption>
+            <caption>
+              {surgical?.executed
+                ? "Tier-2 splice is executed on failed fields only — locked JSON is copied"
+                : "Control-plane spend is real; downstream Mini/Frontier spend is modeled unless a field is spliced"}
+            </caption>
             <thead>
               <tr>
                 <th></th>
@@ -405,6 +604,7 @@ export default function Studio({ boot }) {
 
           <h2>Fields</h2>
           <Table
+            caption="Per-field noul gates. Failed fields go to surgical repair; locked fields are not regenerated."
             headers={["Field", "P(yes)", "Conf", "Gate"]}
             rows={fields.map((f) => [
               f.field_name,
@@ -415,8 +615,40 @@ export default function Studio({ boot }) {
             rowClasses={fields.map((f) => (f.verified ? "ok" : "fail"))}
           />
 
+          {surgical?.executed ? (
+            <div className="patch">
+              <h2>Surgical splice</h2>
+              <p className="note">
+                {surgical.token_budget}-token prompt · {surgical.patches?.length || 0} field
+                {surgical.patches?.length === 1 ? "" : "s"} repaired. Locked JSON copied unchanged.
+              </p>
+              <Table
+                caption="Before / after for failed fields only"
+                headers={["Field", "Before", "After", "Method"]}
+                rows={(surgical.patches || []).map((p) => [
+                  p.field,
+                  String(p.before ?? "—"),
+                  String(p.after ?? "—"),
+                  p.method,
+                ])}
+              />
+              <p className="kicker">Repair prompt</p>
+              <pre>{surgical.prompt}</pre>
+              <p className="kicker">Spliced JSON</p>
+              <pre>{JSON.stringify(surgical.repaired_json, null, 2)}</pre>
+            </div>
+          ) : null}
+
+          {compiled?.stub && useSchema ? (
+            <div className="patch">
+              <h2>BindQuestions stub</h2>
+              <pre>{compiled.stub}</pre>
+            </div>
+          ) : null}
+
           <h2>Questions</h2>
           <Table
+            caption="Atomic questions bound over one SystemOne prefill"
             headers={["Question", "Stage", "Answer", "P", "Gate"]}
             rows={questions.map((q) => [
               <div key={q.id}>
@@ -433,19 +665,20 @@ export default function Studio({ boot }) {
           <h2>Log</h2>
           {history.length ? (
             <Table
+              caption="Recent labeled turns feeding the τ solver"
               headers={["Time", "Route", "ms"]}
               rows={history.map((h) => [h.timestamp, h.final_route_tier, `${h.latency_ms.toFixed(0)} ms`])}
             />
           ) : (
-            <p className="note">No runs yet.</p>
+            <p className="note">No mutating runs yet. Page load is read-only.</p>
           )}
         </section>
       </main>
 
       <footer className="colophon">
         {hosted
-          ? "Hosted workbench. Thresholds and the run log are per-instance and do not persist. Routes come from the payload, not the case name."
-          : "Local workbench. The key never leaves this process. Routes come from the payload, not the case name."}
+          ? "Hosted workbench. Evaluations carry τ inline. The flywheel is per-instance. Live Jev is rate-limited. Routes come from the payload, not the case name."
+          : "Local workbench. Key hold is loopback-only. Routes come from the payload, not the case name."}
       </footer>
     </div>
   );

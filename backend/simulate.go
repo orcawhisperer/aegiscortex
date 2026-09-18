@@ -211,7 +211,7 @@ func parseFlexibleDate(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func simulateCalibratedJevResponse(pipeline PipelineID, state any) *typesafe.SystemOneResponse {
+func simulateCalibratedJevResponse(pipeline PipelineID, state any, specs []BoundQuestionSpec) *typesafe.SystemOneResponse {
 	sig := inspectState(state)
 
 	jailbreakP := 0.03
@@ -302,7 +302,7 @@ func simulateCalibratedJevResponse(pipeline PipelineID, state any) *typesafe.Sys
 			InputTokens:  &inTok,
 			OutputTokens: &outTok,
 		},
-		Nouls: map[string]typesafe.NoulResponse{
+		Nouls: applySimulatedFieldNouls(map[string]typesafe.NoulResponse{
 			qJailbreak:     {Type: "noul", Noul: jailbreakP},
 			qRAGInjection:  {Type: "noul", Noul: ragInjP},
 			qCredentialPII: {Type: "noul", Noul: credP},
@@ -310,7 +310,7 @@ func simulateCalibratedJevResponse(pipeline PipelineID, state any) *typesafe.Sys
 			qFieldAmount:   {Type: "noul", Noul: amountP},
 			qFieldDate:     {Type: "noul", Noul: dateP},
 			qFieldClaim:    {Type: "noul", Noul: claimP},
-		},
+		}, specs, state, sig),
 		Choices: map[string]typesafe.ChoiceResponse[string]{
 			qExecTier:   {Type: "choice", Choice: execTier, Confidence: execConf, Probabilities: execProbs},
 			qAgentSkill: {Type: "choice", Choice: skill, Confidence: skillConf, Probabilities: skillProbs},
@@ -320,6 +320,45 @@ func simulateCalibratedJevResponse(pipeline PipelineID, state any) *typesafe.Sys
 			qHarmSeverity: {Type: "score", Score: harmScore, Confidence: 0.91, Probabilities: harmProbs},
 		},
 	}
+}
+
+func applySimulatedFieldNouls(nouls map[string]typesafe.NoulResponse, specs []BoundQuestionSpec, state any, sig stateSignals) map[string]typesafe.NoulResponse {
+	if nouls == nil {
+		nouls = map[string]typesafe.NoulResponse{}
+	}
+	extraction := extractionObject(state)
+	for _, spec := range specs {
+		if spec.Primitive != "noul" || !isFieldQuestion(spec.Key) {
+			continue
+		}
+		if _, exists := nouls[spec.Key]; exists && (spec.Key == qFieldVendor || spec.Key == qFieldAmount || spec.Key == qFieldDate || spec.Key == qFieldClaim) {
+			continue
+		}
+		name := spec.FieldName
+		if name == "" {
+			name = spec.Key
+		}
+		nl := strings.ToLower(name)
+		ok := false
+		switch {
+		case strings.Contains(nl, "vendor") || strings.Contains(nl, "entity") || strings.Contains(nl, "subject"):
+			ok = sig.VendorSupported
+		case strings.Contains(nl, "amount") || strings.Contains(nl, "value") || strings.Contains(nl, "fine"):
+			ok = sig.AmountSupported
+		case strings.Contains(nl, "date") || strings.Contains(nl, "deadline") || strings.Contains(nl, "notice"):
+			ok = sig.DateSupported && !sig.HallucinatedDate
+		case strings.Contains(nl, "claim") || strings.Contains(nl, "renew"):
+			ok = sig.ClaimSupported
+		default:
+			val := stringify(firstValue(extraction, name))
+			ok = val != "" && (sourceSupportsEntity(sig.SourceText, val) || strings.Contains(sig.SourceText, strings.ToLower(val)))
+		}
+		if sig.Injection {
+			ok = false
+		}
+		nouls[spec.Key] = typesafe.NoulResponse{Type: "noul", Noul: band(ok, 0.95, 0.10)}
+	}
+	return nouls
 }
 
 func band(ok bool, high, low float64) float64 {

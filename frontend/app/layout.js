@@ -23,7 +23,7 @@ const mono = IBM_Plex_Mono({
 
 export const metadata = {
   title: "AegisCortex",
-  description: "Eleven questions. One route. Costs modeled, not spent.",
+  description: "Bind any schema. Repair one field. Calibrate τ. Eleven questions, one route.",
   icons: { icon: "/favicon.svg" },
 };
 
