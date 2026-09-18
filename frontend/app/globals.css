@@ -517,7 +517,7 @@ th {
 
 .primer, .anatomy, .fold {
   margin: 0;
-  padding: 0.55rem 1.6rem 0.7rem;
+  padding: 0.4rem 1.6rem 0.5rem;
   border-bottom: 1px solid var(--rule);
   background: var(--wash);
 }
@@ -553,8 +553,8 @@ th {
 .anatomy-flow {
   display: grid;
   grid-template-columns: 1fr 1.4fr 1fr;
-  gap: 1rem;
-  margin-top: 0.55rem;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
 }
 .anatomy-k {
   margin: 0 0 0.25rem;

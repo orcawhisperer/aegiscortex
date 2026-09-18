@@ -20,7 +20,7 @@ export default function Anatomy({ evalRes, thresholds, onPickRoute }) {
       <div className="anatomy-flow" aria-label="Control-plane stages">
         <div className="anatomy-col">
           <p className="anatomy-k">1 · JSON state + draft</p>
-          <p>Payload on the left. Mini extraction is a hypothesis, not a verdict.</p>
+          <p>Left-rail JSON. The mini extraction is a hypothesis, not a verdict.</p>
         </div>
         <div className="anatomy-col anatomy-fan">
           <p className="anatomy-k">
