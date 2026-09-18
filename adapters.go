@@ -118,9 +118,7 @@ type EvaluationResponse struct {
 // NewCortexEngineWithKey constructs a CortexEngine and optionally sets a key.
 func NewCortexEngineWithKey(key string) *CortexEngine {
 	e := NewCortexEngine()
-	if strings.TrimSpace(key) != "" {
-		e.SetAPIKey(key)
-	}
+	e.SetAPIKey(key)
 	return e
 }
 

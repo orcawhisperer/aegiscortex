@@ -111,7 +111,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 		ctxBytes, _ := json.MarshalIndent(defaultContext, "", "  ")
 
-		evalCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		evalCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		initialEval, err := engine.EvaluateRequest(evalCtx, EvaluationRequest{
 			ScenarioID: "rag_verified_fastpath",
@@ -169,7 +169,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
 			return
 		}
-		evalCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		evalCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		res, err := engine.EvaluateRequest(evalCtx, req)
 		if err != nil {
@@ -256,7 +256,7 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      20 * time.Second,
+		WriteTimeout:      35 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 

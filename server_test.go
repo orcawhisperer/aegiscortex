@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBindQuestionsCount(t *testing.T) {
@@ -61,7 +63,7 @@ func TestPresetPayloadsDriveRouting(t *testing.T) {
 		if len(res.FieldVerifications) != 4 {
 			t.Fatalf("%s: expected 4 field cards, got %d", tc.id, len(res.FieldVerifications))
 		}
-		if res.LatencyMs > 90 {
+		if res.Mode != "LIVE_TYPESAFE_API" && res.LatencyMs > 90 {
 			t.Fatalf("%s: simulator latency should be honest wall-clock, got %.0f ms", tc.id, res.LatencyMs)
 		}
 	}
@@ -85,7 +87,7 @@ func TestScenarioLabelCannotOverridePayload(t *testing.T) {
 func TestHallucinatedDateFailsOnlyDateField(t *testing.T) {
 	engine := NewCortexEngineWithKey("")
 	preset, _ := presetByID("sde_hallucinated_date")
-	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{Context: preset.State})
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{ScenarioID: "sde_hallucinated_date", Context: preset.State})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,5 +222,38 @@ func TestInspectStateHallucination(t *testing.T) {
 	}
 	if !sig.VendorSupported || !sig.AmountSupported {
 		t.Fatalf("vendor/amount should be supported: %+v", sig)
+	}
+}
+
+func TestLiveTypeSafeFanout(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("TYPESAFE_API_KEY"))
+	if key == "" {
+		t.Skip("TYPESAFE_API_KEY not set")
+	}
+	engine := NewCortexEngineWithKey(key)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	want := map[string]string{
+		"gw_rag_injection":      "TIER_0_BLOCK",
+		"sde_hallucinated_date": "TIER_2_SURGICAL_FIELD_REPAIR",
+		"rag_verified_fastpath": "TIER_1_VERIFIED_FASTPATH",
+		"triage_auto_refund":    "TIER_0_AUTO_EXEC",
+	}
+	for id, tier := range want {
+		preset, ok := presetByID(id)
+		if !ok {
+			t.Fatalf("missing preset %s", id)
+		}
+		res, err := engine.EvaluateRequest(ctx, EvaluationRequest{ScenarioID: id, Context: preset.State})
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if res.FallbackUsed || res.Mode != "LIVE_TYPESAFE_API" {
+			t.Fatalf("%s: expected live API, mode=%s fallback=%v err=%s", id, res.Mode, res.FallbackUsed, res.LiveError)
+		}
+		if res.FinalRouteTier != tier {
+			t.Fatalf("%s: live route %s want %s (%s) fields=%v", id, res.FinalRouteTier, tier, res.FinalDecision, res.FailedFields)
+		}
 	}
 }

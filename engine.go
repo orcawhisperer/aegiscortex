@@ -221,7 +221,7 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 		client, err := typesafe.NewClient(
 			typesafe.WithAPIKey(apiKey),
 			typesafe.WithBaseURL(baseURL),
-			typesafe.WithTimeout(10*time.Second),
+			typesafe.WithTimeout(20*time.Second),
 			typesafe.WithDefaultModel(typesafe.ModelJev1_13_0),
 		)
 		if err != nil {
@@ -440,6 +440,15 @@ func decideRoute(
 			fieldNote, trustScore,
 		)
 
+	case trustScore < thresh.CompositePassScore:
+		verdict = "ESCALATE_REASONING_TIER2"
+		executedTier = "Tier 2: Uncertainty-gated escalation"
+		executedTotalCost = tsCost + modeledFrontierUSD
+		summary = fmt.Sprintf(
+			"Composite quality (%.1f/100) is below the pass gate (%.0f). Routing to Tier-2 review.",
+			trustScore, thresh.CompositePassScore,
+		)
+
 	case execTier.Choice == "tier0_deterministic" && execTier.Confidence >= thresh.ChoiceActConfidence && skill.Choice != "none_needed" && skill.Choice != "incident_pager_alert":
 		verdict = "AUTO_EXECUTE_TIER0"
 		executedTier = "Tier 0: Autonomous deterministic skill (" + skill.Choice + ")"
@@ -447,15 +456,6 @@ func decideRoute(
 		summary = fmt.Sprintf(
 			"High-confidence policy match (execution_tier conf=%.2f ≥ τ_route=%.2f). Modeled action: `%s` with $0.00 generation cost. No webhook is fired from this studio.",
 			execTier.Confidence, thresh.ChoiceActConfidence, skill.Choice,
-		)
-
-	case execTier.Confidence < thresh.ChoiceActConfidence || trustScore < thresh.CompositePassScore:
-		verdict = "ESCALATE_REASONING_TIER2"
-		executedTier = "Tier 2: Uncertainty-gated escalation"
-		executedTotalCost = tsCost + modeledFrontierUSD
-		summary = fmt.Sprintf(
-			"Confidence (%.2f) or composite quality (%.1f/100) is below the act gates (τ_route=%.2f, composite≥%.0f). Routing to Tier-2 review.",
-			execTier.Confidence, trustScore, thresh.ChoiceActConfidence, thresh.CompositePassScore,
 		)
 
 	default:
