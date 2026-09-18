@@ -31,13 +31,13 @@
     var textNode = $("mode-text");
     if (!pill || !textNode) return;
     var live = hasKey || mode === "LIVE_TYPESAFE_API";
-    pill.className = "mode-pill " + (live && !fallback ? "mode-live" : "mode-sim");
+    pill.className = "mode " + (live && !fallback ? "live" : "sim");
     if (fallback) {
-      textNode.textContent = "Live failed · simulator fallback";
+      textNode.textContent = "Live failed — simulator";
     } else if (live) {
-      textNode.textContent = "Live TypeSafe API";
+      textNode.textContent = "Live API";
     } else {
-      textNode.textContent = "Calibrated simulator";
+      textNode.textContent = "Simulator";
     }
   }
 
@@ -51,7 +51,10 @@
       btn.type = "button";
       btn.setAttribute("data-scenario-id", p.id);
       var top = el("div", "scenario-top");
-      top.appendChild(el("span", "scenario-title", p.title));
+      var title = el("span", "scenario-title");
+      title.appendChild(el("span", "scenario-index", String(i + 1).padStart(2, "0")));
+      title.appendChild(document.createTextNode(p.title));
+      top.appendChild(title);
       top.appendChild(el("span", "scenario-tag", p.badge));
       btn.appendChild(top);
       btn.appendChild(el("p", "scenario-desc", p.description));
@@ -69,74 +72,86 @@
     container.replaceChildren.apply(container, nodes);
   }
 
+  function renderTable(container, headers, rows, rowClasses) {
+    var table = el("table");
+    var thead = el("thead");
+    var hr = el("tr");
+    headers.forEach(function (h) { hr.appendChild(el("th", null, h)); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (cells, i) {
+      var tr = el("tr", rowClasses && rowClasses[i] ? rowClasses[i] : "");
+      cells.forEach(function (c) {
+        var td = el("td");
+        if (c && c.nodeType) td.appendChild(c);
+        else td.textContent = c == null ? "" : String(c);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    container.replaceChildren(table);
+  }
+
   function renderFieldVerifications(fields) {
     var grid = $("field-verifications-grid");
     if (!grid) return;
-    var cards = [];
+    var rows = [];
+    var cls = [];
     for (var i = 0; i < (fields || []).length; i++) {
       var f = fields[i];
-      var card = el("div", "field-card " + (f.verified ? "ok" : "bad"));
-      var top = el("div", "field-top");
-      top.appendChild(el("span", "mono", f.field_name));
-      top.appendChild(el("span", "mono", f.verified ? "LOCKED" : "REPAIR"));
-      card.appendChild(top);
-      card.appendChild(el("div", "mono", "P(YES)=" + (f.yes_prob * 100).toFixed(1) + "%  conf=" + f.confidence.toFixed(2)));
-      var bar = el("div", "bar");
-      var fill = el("span");
-      fill.style.width = Math.max(4, Math.min(100, Math.round(f.yes_prob * 100))) + "%";
-      bar.appendChild(fill);
-      card.appendChild(bar);
-      card.appendChild(el("div", "mono", f.action));
-      cards.push(card);
+      rows.push([
+        f.field_name,
+        (f.yes_prob * 100).toFixed(0) + "%",
+        f.confidence.toFixed(2),
+        f.verified ? "lock" : "repair"
+      ]);
+      cls.push(f.verified ? "ok" : "fail");
     }
-    grid.replaceChildren.apply(grid, cards);
+    renderTable(grid, ["Field", "P(yes)", "Conf", "Gate"], rows, cls);
   }
 
   function renderQuestionsMatrix(questions) {
     var matrix = $("questions-matrix");
     if (!matrix) return;
-    var cards = [];
+    var rows = [];
     for (var i = 0; i < (questions || []).length; i++) {
       var q = questions[i];
-      var card = el("div", "q-card");
-      var top = el("div", "q-top");
-      top.appendChild(el("span", "q-id", q.id));
-      top.appendChild(el("span", "chip", q.stage + " · " + q.type));
-      card.appendChild(top);
-      card.appendChild(el("p", "q-prompt", q.prompt));
-      card.appendChild(el("div", "mono", q.selected_choice + "  " + (q.top_probability * 100).toFixed(1) + "%  conf=" + q.confidence.toFixed(2)));
-      var bar = el("div", "bar");
-      var fill = el("span");
-      fill.style.width = Math.max(4, Math.min(100, Math.round(q.top_probability * 100))) + "%";
-      bar.appendChild(fill);
-      card.appendChild(bar);
-      card.appendChild(el("div", "mono", q.route_reason));
-      cards.push(card);
+      var prompt = el("div");
+      prompt.appendChild(el("div", null, q.id));
+      prompt.appendChild(el("div", "q-prompt", q.prompt));
+      rows.push([
+        prompt,
+        q.stage,
+        q.selected_choice,
+        (q.top_probability * 100).toFixed(0) + "%",
+        q.route_reason.replace("Gate: ", "")
+      ]);
     }
-    matrix.replaceChildren.apply(matrix, cards);
+    renderTable(matrix, ["Question", "Stage", "Answer", "P", "Gate"], rows);
   }
 
   function renderHistory(rows) {
     var list = $("history-list");
     if (!list) return;
-    var nodes = [];
-    for (var i = 0; i < (rows || []).length; i++) {
-      var h = rows[i];
-      var row = el("div", "history-row");
-      row.appendChild(el("span", null, h.timestamp));
-      row.appendChild(el("span", null, h.final_route_tier));
-      row.appendChild(el("span", null, h.latency_ms.toFixed(0) + " ms"));
-      nodes.push(row);
+    if (!rows || !rows.length) {
+      list.replaceChildren(el("p", "note", "No runs yet."));
+      return;
     }
-    if (!nodes.length) nodes.push(el("div", "hint", "No evaluations yet."));
-    list.replaceChildren.apply(list, nodes);
+    var body = [];
+    for (var i = 0; i < rows.length; i++) {
+      var h = rows[i];
+      body.push([h.timestamp, h.final_route_tier, h.latency_ms.toFixed(0) + " ms"]);
+    }
+    renderTable(list, ["Time", "Route", "ms"], body);
   }
 
   function tierClass(tier) {
-    if (tier === "TIER_0_BLOCK") return "tier-pill tier-block";
-    if (tier === "TIER_0_AUTO_EXEC") return "tier-pill tier-auto";
-    if (tier && tier.indexOf("TIER_2") === 0) return "tier-pill tier-repair";
-    return "tier-pill tier-fastpath";
+    if (tier === "TIER_0_BLOCK") return "stamp tier-block";
+    if (tier === "TIER_0_AUTO_EXEC") return "stamp tier-auto";
+    if (tier && tier.indexOf("TIER_2") === 0) return "stamp tier-repair";
+    return "stamp tier-fastpath";
   }
 
   function updateDashboard(res) {
@@ -144,25 +159,25 @@
     updateModePill(res.mode, res.mode === "LIVE_TYPESAFE_API", res.fallback_used);
     if (res.cascade) {
       $("kpi-latency").textContent = res.latency_ms.toFixed(0) + " ms";
-      $("kpi-latency-sub").textContent = "Live Jev P50 reference " + res.cascade.reference_jev_p50_ms.toFixed(0) + " ms";
+      $("kpi-latency-sub").textContent = "Jev P50 " + res.cascade.reference_jev_p50_ms.toFixed(0) + " ms";
       $("kpi-jev-cost").textContent = "$" + res.cascade.aegis_control_cost_usd.toFixed(6);
       $("kpi-savings-pct").textContent = res.cascade.cost_savings_percent.toFixed(1) + "%";
-      $("kpi-savings-sub").textContent = "vs $" + res.cascade.naive_frontier_cost_usd.toFixed(5) + " unrouted frontier";
+      $("kpi-savings-sub").textContent = "baseline $" + res.cascade.naive_frontier_cost_usd.toFixed(5);
       $("arch-naive-cost").textContent = "$" + res.cascade.naive_frontier_cost_usd.toFixed(6);
       $("arch-naive-lat").textContent = res.cascade.naive_frontier_latency_ms.toFixed(0) + " ms";
       $("arch-legacy-cost").textContent = "$" + res.cascade.legacy_router_cost_usd.toFixed(6);
       $("arch-legacy-lat").textContent = res.cascade.legacy_router_latency_ms.toFixed(0) + " ms";
       $("arch-aegis-cost").textContent = "$" + res.cascade.aegis_blended_cost_usd.toFixed(6);
-      $("arch-aegis-lat").textContent = res.cascade.aegis_total_latency_ms.toFixed(0) + " ms wall-clock";
+      $("arch-aegis-lat").textContent = res.cascade.aegis_total_latency_ms.toFixed(0) + " ms";
     }
-    $("kpi-composite").textContent = res.composite_score.toFixed(1) + " / 100";
+    $("kpi-composite").textContent = res.composite_score.toFixed(1);
     $("kpi-route-tier").textContent = res.final_route_tier;
     if (res.flywheel) {
       state.flywheel = res.flywheel;
-      $("kpi-flywheel").textContent = res.flywheel.distilled_golden_examples + " runs";
-      $("kpi-flywheel-sub").textContent = res.flywheel.guardrails_blocked + " blocked · " + res.flywheel.auto_executed + " auto";
+      $("kpi-flywheel").textContent = String(res.flywheel.distilled_golden_examples);
+      $("kpi-flywheel-sub").textContent = res.flywheel.guardrails_blocked + " block · " + res.flywheel.auto_executed + " auto";
       $("recommended-line").textContent =
-        "Recommended τ  sec=" + res.flywheel.recommended_block_prob.toFixed(2) +
+        "τ  sec=" + res.flywheel.recommended_block_prob.toFixed(2) +
         "  field=" + res.flywheel.recommended_verify_min.toFixed(2) +
         "  route=" + res.flywheel.recommended_act_gate.toFixed(2) +
         "  composite=" + res.flywheel.recommended_composite.toFixed(0) +

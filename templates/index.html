@@ -8,162 +8,144 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark" aria-hidden="true">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3l7 3v6c0 4.5-2.8 7.8-7 9-4.2-1.2-7-4.5-7-9V6l7-3z" stroke="currentColor" stroke-width="1.6"/>
-          <path d="M8.5 12.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div>
-        <div class="brand-name">Aegis<span>Cortex</span></div>
-        <div class="brand-sub">Speculative control plane · typesafe-sdk-go v0.6.0 · Jev-1.13</div>
-      </div>
+  <p class="folio">
+    <span>Loopback edition</span>
+    <span>TypeSafe Jev-1.13 · sdk-go 0.6.0</span>
+    <span>127.0.0.1:8090</span>
+  </p>
+
+  <header class="masthead">
+    <div class="masthead-left">
+      <h1>AegisCortex</h1>
+      <p class="standfirst">Eleven questions. One route. Costs modeled, not spent.</p>
     </div>
-    <div class="topbar-actions">
-      <div id="mode-indicator" class="mode-pill {{ if .HasAPIKey }}mode-live{{ else }}mode-sim{{ end }}">
-        <span class="mode-dot" aria-hidden="true"></span>
-        <span id="mode-text">{{ if .HasAPIKey }}Live TypeSafe API{{ else }}Calibrated simulator{{ end }}</span>
-      </div>
+    <div class="masthead-right">
+      <p id="mode-indicator" class="mode {{ if .HasAPIKey }}live{{ else }}sim{{ end }}">
+        <span id="mode-text">{{ if .HasAPIKey }}Live API{{ else }}Simulator{{ end }}</span>
+      </p>
       <form id="key-form" class="key-form" autocomplete="off">
         <label class="sr-only" for="api-key-input">TypeSafe API key</label>
-        <input id="api-key-input" type="password" name="api_key" placeholder="TYPESAFE_API_KEY" spellcheck="false" />
-        <button id="save-key-btn" type="submit">Set key</button>
+        <input id="api-key-input" type="password" name="api_key" placeholder="API key" spellcheck="false" />
+        <button id="save-key-btn" type="submit">Hold in memory</button>
       </form>
     </div>
   </header>
 
-  <main class="workspace">
-    <section class="kpi-strip" aria-label="FinOps telemetry">
-      <article class="kpi">
-        <span class="kpi-label">Wall-clock latency</span>
-        <strong id="kpi-latency" class="kpi-value accent-cyan">{{ printf "%.0f ms" .InitialEval.LatencyMs }}</strong>
-        <span id="kpi-latency-sub" class="kpi-sub">Live Jev P50 reference {{ printf "%.0f ms" .InitialEval.Cascade.ReferenceJevP50Ms }}</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Fan-out cost</span>
-        <strong id="kpi-jev-cost" class="kpi-value accent-emerald">${{ printf "%.6f" .InitialEval.Cascade.AegisControlCostUSD }}</strong>
-        <span class="kpi-sub">$0.042 / 1M input · $0.00 output</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Modeled savings</span>
-        <strong id="kpi-savings-pct" class="kpi-value accent-emerald">{{ printf "%.1f%%" .InitialEval.Cascade.CostSavingsPercent }}</strong>
-        <span id="kpi-savings-sub" class="kpi-sub">vs ${{ printf "%.5f" .InitialEval.Cascade.NaiveFrontierCostUSD }} unrouted frontier</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Composite quality</span>
-        <strong id="kpi-composite" class="kpi-value accent-violet">{{ printf "%.1f / 100" .InitialEval.CompositeScore }}</strong>
-        <span id="kpi-route-tier" class="kpi-sub">{{ .InitialEval.FinalRouteTier }}</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Calibration flywheel</span>
-        <strong id="kpi-flywheel" class="kpi-value accent-amber">{{ .Flywheel.DistilledGoldenExamples }} runs</strong>
-        <span id="kpi-flywheel-sub" class="kpi-sub">{{ .Flywheel.GuardrailsBlocked }} blocked · {{ .Flywheel.AutoExecuted }} auto</span>
-      </article>
-    </section>
-
-    <div class="layout">
-      <aside class="panel">
-        <div class="panel-head">
-          <h2>1. Traffic scenarios</h2>
-          <span class="chip">Engine-routed</span>
-        </div>
-        <div id="scenario-list" class="scenario-list"></div>
-
-        <div class="section-divider">
-          <div class="panel-head">
-            <h2>2. Gate thresholds (τ)</h2>
-            <button id="apply-recommended" type="button" class="btn-quiet">Apply recommended</button>
-          </div>
-          <div class="sliders">
-            <label class="slider-row">
-              <span>Security gate <strong id="val-security">{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}</strong></span>
-              <input id="slider-security" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}" />
-            </label>
-            <label class="slider-row">
-              <span>Field verify <strong id="val-field">{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}</strong></span>
-              <input id="slider-field" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}" />
-            </label>
-            <label class="slider-row">
-              <span>Router confidence <strong id="val-router">{{ printf "%.2f" .Thresholds.RouterConfidence }}</strong></span>
-              <input id="slider-router" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.RouterConfidence }}" />
-            </label>
-            <label class="slider-row">
-              <span>Composite score <strong id="val-composite">{{ printf "%.0f" .Thresholds.CompositePassThreshold }}</strong></span>
-              <input id="slider-composite" type="range" min="30" max="95" step="1" value="{{ printf "%.0f" .Thresholds.CompositePassThreshold }}" />
-            </label>
-          </div>
-          <p id="recommended-line" class="hint"></p>
-        </div>
-
-        <div class="section-divider">
-          <div class="panel-head">
-            <h2>3. Shared context</h2>
-            <button id="run-eval-btn" type="button" class="btn-primary">Run fan-out</button>
-          </div>
-          <label class="sr-only" for="context-editor">JSON context payload</label>
-          <textarea id="context-editor" spellcheck="false">{{ .InitialContextJSON }}</textarea>
-          <div id="status-banner" class="status" role="status">Hydrating from server boot payload.</div>
-        </div>
-      </aside>
-
-      <section class="stack">
-        <article class="decision">
-          <div class="decision-top">
-            <div>
-              <p class="eyebrow">3-tier route (from engine verdict)</p>
-              <h3 id="decision-tier-title">{{ .InitialEval.FinalRouteTier }}</h3>
-            </div>
-            <div id="decision-badge" class="tier-pill">{{ .InitialEval.FinalRouteTier }}</div>
-          </div>
-          <p id="decision-rationale" class="rationale">{{ .InitialEval.FinalDecision }}</p>
-          <p id="failed-fields-line" class="hint"></p>
-          <div class="arch-grid">
-            <div class="arch">
-              <span>Naive frontier + judge</span>
-              <strong id="arch-naive-cost">${{ printf "%.6f" .InitialEval.Cascade.NaiveFrontierCostUSD }}</strong>
-              <em id="arch-naive-lat">{{ printf "%.0f ms" .InitialEval.Cascade.NaiveFrontierLatencyMs }}</em>
-            </div>
-            <div class="arch">
-              <span>Legacy prompt router</span>
-              <strong id="arch-legacy-cost">${{ printf "%.6f" .InitialEval.Cascade.LegacyRouterCostUSD }}</strong>
-              <em id="arch-legacy-lat">{{ printf "%.0f ms" .InitialEval.Cascade.LegacyRouterLatencyMs }}</em>
-            </div>
-            <div class="arch arch-aegis">
-              <span>AegisCortex blended</span>
-              <strong id="arch-aegis-cost">${{ printf "%.6f" .InitialEval.Cascade.AegisBlendedCostUSD }}</strong>
-              <em id="arch-aegis-lat">{{ printf "%.0f ms" .InitialEval.Cascade.AegisTotalLatencyMs }} wall-clock</em>
-            </div>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <h2>Per-field verification</h2>
-            <span class="chip">From noul answers</span>
-          </div>
-          <div id="field-verifications-grid" class="field-grid"></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <h2>11-question fan-out</h2>
-            <span class="chip">BindQuestions</span>
-          </div>
-          <div id="questions-matrix" class="q-grid"></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <h2>Recent routes</h2>
-            <span class="chip">In-memory</span>
-          </div>
-          <div id="history-list" class="history"></div>
-        </article>
-      </section>
+  <section class="ledger" aria-label="Run figures">
+    <div>
+      <span>Latency</span>
+      <strong id="kpi-latency">{{ printf "%.0f ms" .InitialEval.LatencyMs }}</strong>
+      <em id="kpi-latency-sub">Jev P50 {{ printf "%.0f ms" .InitialEval.Cascade.ReferenceJevP50Ms }}</em>
     </div>
+    <div>
+      <span>Fan-out</span>
+      <strong id="kpi-jev-cost">${{ printf "%.6f" .InitialEval.Cascade.AegisControlCostUSD }}</strong>
+      <em>$0.042 / 1M in</em>
+    </div>
+    <div>
+      <span>Saved vs frontier</span>
+      <strong id="kpi-savings-pct">{{ printf "%.1f%%" .InitialEval.Cascade.CostSavingsPercent }}</strong>
+      <em id="kpi-savings-sub">baseline ${{ printf "%.5f" .InitialEval.Cascade.NaiveFrontierCostUSD }}</em>
+    </div>
+    <div>
+      <span>Trust</span>
+      <strong id="kpi-composite">{{ printf "%.1f" .InitialEval.CompositeScore }}</strong>
+      <em id="kpi-route-tier">{{ .InitialEval.FinalRouteTier }}</em>
+    </div>
+    <div>
+      <span>Runs</span>
+      <strong id="kpi-flywheel">{{ .Flywheel.DistilledGoldenExamples }}</strong>
+      <em id="kpi-flywheel-sub">{{ .Flywheel.GuardrailsBlocked }} block · {{ .Flywheel.AutoExecuted }} auto</em>
+    </div>
+  </section>
+
+  <main class="sheet">
+    <aside>
+      <h2>Cases</h2>
+      <div id="scenario-list" class="cases"></div>
+
+      <h2>Gates</h2>
+      <button id="apply-recommended" type="button" class="linkish">Use recommended τ</button>
+      <div class="sliders">
+        <label>
+          Security <b id="val-security">{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}</b>
+          <input id="slider-security" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}" />
+        </label>
+        <label>
+          Field <b id="val-field">{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}</b>
+          <input id="slider-field" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}" />
+        </label>
+        <label>
+          Router <b id="val-router">{{ printf "%.2f" .Thresholds.RouterConfidence }}</b>
+          <input id="slider-router" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.RouterConfidence }}" />
+        </label>
+        <label>
+          Composite <b id="val-composite">{{ printf "%.0f" .Thresholds.CompositePassThreshold }}</b>
+          <input id="slider-composite" type="range" min="30" max="95" step="1" value="{{ printf "%.0f" .Thresholds.CompositePassThreshold }}" />
+        </label>
+      </div>
+      <p id="recommended-line" class="note"></p>
+
+      <div class="run-row">
+        <h2>Payload</h2>
+        <button id="run-eval-btn" type="button">Evaluate</button>
+      </div>
+      <label class="sr-only" for="context-editor">JSON context payload</label>
+      <textarea id="context-editor" spellcheck="false">{{ .InitialContextJSON }}</textarea>
+      <p id="status-banner" class="status" role="status">Ready.</p>
+    </aside>
+
+    <section class="copy">
+      <p class="kicker">Ruling</p>
+      <div class="verdict-line">
+        <h2 id="decision-tier-title">{{ .InitialEval.FinalRouteTier }}</h2>
+        <p id="decision-badge" class="stamp">{{ .InitialEval.FinalRouteTier }}</p>
+      </div>
+      <p id="decision-rationale" class="lede">{{ .InitialEval.FinalDecision }}</p>
+      <p id="failed-fields-line" class="note"></p>
+
+      <table class="compare">
+        <caption>Modeled spend — no downstream model is called</caption>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Cost</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Frontier + judge</td>
+            <td id="arch-naive-cost">${{ printf "%.6f" .InitialEval.Cascade.NaiveFrontierCostUSD }}</td>
+            <td id="arch-naive-lat">{{ printf "%.0f ms" .InitialEval.Cascade.NaiveFrontierLatencyMs }}</td>
+          </tr>
+          <tr>
+            <td>Legacy router</td>
+            <td id="arch-legacy-cost">${{ printf "%.6f" .InitialEval.Cascade.LegacyRouterCostUSD }}</td>
+            <td id="arch-legacy-lat">{{ printf "%.0f ms" .InitialEval.Cascade.LegacyRouterLatencyMs }}</td>
+          </tr>
+          <tr>
+            <td>This run</td>
+            <td id="arch-aegis-cost">${{ printf "%.6f" .InitialEval.Cascade.AegisBlendedCostUSD }}</td>
+            <td id="arch-aegis-lat">{{ printf "%.0f ms" .InitialEval.Cascade.AegisTotalLatencyMs }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Fields</h2>
+      <div id="field-verifications-grid"></div>
+
+      <h2>Questions</h2>
+      <div id="questions-matrix"></div>
+
+      <h2>Log</h2>
+      <div id="history-list"></div>
+    </section>
   </main>
+
+  <footer class="colophon">
+    Local workbench. The key never leaves this process. Routes come from the payload, not the case name.
+  </footer>
 
   <script id="boot-data" type="application/json">{{ .BootJSON }}</script>
   <script src="/static/app.js"></script>

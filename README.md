@@ -2,7 +2,7 @@
 
 Local studio for an **11-question speculative AI control plane** built on [`typesafe-sdk-go` v0.6.0](https://github.com/orcawhisperer/typesafe-sdk-go) and TypeSafe AI (`Jev-1.13`).
 
-It is a **loopback FinOps workbench**, not a production gateway. The calibrated simulator inspects the JSON payload you send. Route labels, field cards, and flywheel counters are computed from those answers — not from the scenario name.
+It is a **loopback FinOps workbench**, not a production gateway. The calibrated simulator inspects the JSON payload you send. Route labels, field rows, and flywheel counters are computed from those answers — not from the scenario name. The studio is a paper ledger, not a glow-card dashboard.
 
 ## What it does
 
@@ -15,7 +15,7 @@ Every evaluation binds **11 questions** in one `system_one` call:
 | Per-field gate | `verify_field_vendor_name`, `verify_field_invoice_amount`, `verify_field_invoice_date`, `verify_rag_claim_grounding` | Lock fields independently; escalate only failures |
 | Citation | `citation_grounding` | `verbatim_supported` vs `extrapolated` / `contradicted` |
 
-Downstream Mini / Frontier costs in the dashboard are **modeled** (“if this route were executed”). The studio does not call those LLMs and does not fire refund webhooks.
+Downstream Mini / Frontier costs in the ledger are **modeled** (“if this route were executed”). The studio does not call those LLMs and does not fire refund webhooks.
 
 ## Quickstart
 

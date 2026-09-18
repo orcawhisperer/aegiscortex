@@ -123,7 +123,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 
 		data := PageTemplateData{
-			Title:              "AegisCortex — Speculative AI Control Plane",
+			Title:              "AegisCortex",
 			HasAPIKey:          engine.HasAPIKey(),
 			Presets:            presets,
 			Thresholds:         engine.GetThresholds(),
