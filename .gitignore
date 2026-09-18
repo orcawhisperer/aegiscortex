@@ -7,6 +7,10 @@
 # Env
 .env
 .env.*
+!.env.example
+
+# Vercel CLI
+.vercel
 
 # OS / editor
 .DS_Store
