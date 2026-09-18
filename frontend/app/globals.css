@@ -6,9 +6,9 @@
   --muted: #6a5f52;
   --mark: #8f2a1f;
   --ok: #2d4a32;
-  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
-  --mono: "Courier New", Courier, monospace;
+  --sans: var(--font-sans), "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --serif: var(--font-serif), "Iowan Old Style", Palatino, "Times New Roman", serif;
+  --mono: var(--font-mono), "Courier New", Courier, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -369,6 +369,21 @@ th {
   font-size: 0.76rem;
   color: var(--muted);
 }
+
+.pending .copy,
+.pending .ledger strong {
+  opacity: 0.55;
+}
+
+.sk {
+  display: block;
+  height: 0.7rem;
+  max-width: 8rem;
+  background: var(--rule);
+  opacity: 0.35;
+}
+.sk-lg { height: 1.35rem; max-width: 11rem; margin: 0.25rem 0; }
+.sk-block { height: 3.2rem; max-width: none; margin: 0.55rem 0; }
 
 @media (max-width: 960px) {
   .folio { flex-wrap: wrap; }

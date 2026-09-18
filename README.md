@@ -4,7 +4,7 @@ Local studio for an **11-question speculative AI control plane** built on [`type
 
 It is a **loopback FinOps workbench**, not a production gateway. The calibrated simulator inspects the JSON payload you send. Route labels, field rows, and flywheel counters are computed from those answers — not from the scenario name.
 
-Layout matches the [Next.js + Gin starter](https://vercel.com/templates/next.js/next-js-gin-starter): Next.js at `/`, Gin at `/svc/api`.
+Layout matches the [Next.js + Gin starter](https://vercel.com/templates/next.js/next-js-gin-starter): Next.js at `/`, Gin at `/svc/api`. The first ruling is rendered on the server (App Router, `force-dynamic`) via a private service binding; the browser then evaluates through `/svc/api`. Fonts are self-hosted with `next/font`.
 
 ```txt
 aegiscortex/
