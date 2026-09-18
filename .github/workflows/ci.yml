@@ -13,7 +13,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-      - name: Test
+      - name: Test backend
+        working-directory: backend
         run: go test ./...
-      - name: Vet
+      - name: Vet backend
+        working-directory: backend
         run: go vet ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build

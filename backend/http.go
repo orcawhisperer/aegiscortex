@@ -1,45 +1,16 @@
-package main
+package aegiscortex
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
-	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 )
 
-//go:embed templates/* static/*
-var embeddedAssets embed.FS
-
 const defaultBindAddr = "127.0.0.1:8090"
-
-// PageTemplateData is the server-rendered shell plus a JSON boot payload.
-type PageTemplateData struct {
-	Title              string
-	HasAPIKey          bool
-	Hosted             bool
-	Presets            []ScenarioPreset
-	Thresholds         PipelineThresholds
-	InitialEval        EvaluationResponse
-	InitialContextJSON string
-	Flywheel           FlywheelTelemetryView
-	BootJSON           template.JS
-}
-
-type bootPayload struct {
-	HasAPIKey  bool                  `json:"has_api_key"`
-	Presets    []ScenarioPreset      `json:"presets"`
-	Thresholds PipelineThresholds    `json:"thresholds"`
-	Eval       EvaluationResponse    `json:"eval"`
-	Flywheel   FlywheelTelemetryView `json:"flywheel"`
-}
 
 // SecurityHeadersMiddleware enforces web security headers and HTTP verb restrictions.
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
@@ -68,19 +39,9 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// NewServerHandler constructs the HTTP mux for AegisCortex.
+// NewServerHandler constructs the JSON API mux. The Next.js frontend owns HTML.
 func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
-	tmpl, err := template.ParseFS(embeddedAssets, "templates/index.html")
-	if err != nil {
-		return nil, err
-	}
-
 	mux := http.NewServeMux()
-	mux.Handle("/static/", http.FileServer(http.FS(embeddedAssets)))
-
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, embeddedAssets, "static/favicon.svg")
-	})
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -90,63 +51,10 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":          true,
 			"has_api_key": engine.HasAPIKey(),
-			"hosted":      hostedOnVercel(),
+			"hosted":      HostedOnVercel(),
+			"service":     "backend",
+			"framework":   "go-gin",
 		})
-	})
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		presets := engine.GetPresets()
-		var defaultContext map[string]any
-		for _, p := range presets {
-			if p.ID == "rag_verified_fastpath" {
-				defaultContext = p.Context
-				break
-			}
-		}
-		ctxBytes, _ := json.MarshalIndent(defaultContext, "", "  ")
-
-		evalCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
-		defer cancel()
-		initialEval, err := engine.EvaluateRequest(evalCtx, EvaluationRequest{
-			ScenarioID: "rag_verified_fastpath",
-			Context:    defaultContext,
-		})
-		if err != nil {
-			http.Error(w, "failed initial evaluation", http.StatusInternalServerError)
-			return
-		}
-
-		data := PageTemplateData{
-			Title:              "AegisCortex",
-			HasAPIKey:          engine.HasAPIKey(),
-			Hosted:             hostedOnVercel(),
-			Presets:            presets,
-			Thresholds:         engine.GetThresholds(),
-			InitialEval:        initialEval,
-			InitialContextJSON: string(ctxBytes),
-			Flywheel:           engine.GetFlywheel(),
-		}
-		data.BootJSON = marshalBoot(bootPayload{
-			HasAPIKey:  data.HasAPIKey,
-			Presets:    data.Presets,
-			Thresholds: data.Thresholds,
-			Eval:       data.InitialEval,
-			Flywheel:   data.Flywheel,
-		})
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, data); err != nil {
-			http.Error(w, "template render error", http.StatusInternalServerError)
-		}
 	})
 
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +64,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"has_api_key": engine.HasAPIKey(),
+			"hosted":      HostedOnVercel(),
 			"presets":     engine.GetPresets(),
 			"thresholds":  engine.GetThresholds(),
 			"flywheel":    engine.GetFlywheel(),
@@ -202,7 +111,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if hostedOnVercel() {
+		if HostedOnVercel() {
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "On Vercel, set TYPESAFE_API_KEY in project environment variables. Browser key hold is local-only.",
 			})
@@ -229,15 +138,17 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 	return SecurityHeadersMiddleware(mux), nil
 }
 
-func hostedOnVercel() bool {
+// HostedOnVercel reports the Vercel function/platform environment.
+func HostedOnVercel() bool {
 	return os.Getenv("VERCEL") == "1" || os.Getenv("VERCEL_ENV") != ""
 }
 
-func listenAddr() (string, error) {
-	if hostedOnVercel() {
+// ListenAddr is :PORT on Vercel and loopback locally.
+func ListenAddr() (string, error) {
+	if HostedOnVercel() {
 		port := strings.TrimSpace(os.Getenv("PORT"))
 		if port == "" {
-			port = "3000"
+			port = "3001"
 		}
 		if strings.ContainsAny(port, ":/") {
 			return "", fmt.Errorf("invalid PORT %q", port)
@@ -254,64 +165,8 @@ func listenAddr() (string, error) {
 	return addr, nil
 }
 
-func marshalBoot(v any) template.JS {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "null"
-	}
-	s := strings.ReplaceAll(string(b), "<", `\u003c`)
-	s = strings.ReplaceAll(s, "\u2028", `\u2028`)
-	s = strings.ReplaceAll(s, "\u2029", `\u2029`)
-	return template.JS(s)
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func main() {
-	addr, err := listenAddr()
-	if err != nil {
-		log.Fatalf("security policy violation: %v", err)
-	}
-
-	engine := NewCortexEngineWithKey(os.Getenv("TYPESAFE_API_KEY"))
-	handler, err := NewServerHandler(engine)
-	if err != nil {
-		log.Fatalf("failed to initialize AegisCortex server: %v", err)
-	}
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      35 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("AegisCortex listening on http://%s (sim unless TYPESAFE_API_KEY is set)", addr)
-		errCh <- srv.ListenAndServe()
-	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
-	case sig := <-sigCh:
-		log.Printf("received %s, shutting down", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("graceful shutdown error: %v", err)
-		}
-	}
 }

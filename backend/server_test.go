@@ -1,4 +1,4 @@
-package main
+package aegiscortex
 
 import (
 	"bytes"
@@ -159,15 +159,15 @@ func TestHTTPServerSecurityAndEvaluate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqRoot := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	recRoot := httptest.NewRecorder()
 	handler.ServeHTTP(recRoot, reqRoot)
 	if recRoot.Code != http.StatusOK {
-		t.Fatalf("GET / = %d", recRoot.Code)
+		t.Fatalf("GET /api/state = %d", recRoot.Code)
 	}
 	body := recRoot.Body.String()
-	if !strings.Contains(body, "Aegis") || strings.Contains(body, "cdn.tailwindcss.com") {
-		t.Fatalf("expected self-contained studio HTML")
+	if !strings.Contains(body, "rag_verified_fastpath") || strings.Contains(body, "cdn.tailwindcss.com") {
+		t.Fatalf("expected JSON studio state, got %s", body)
 	}
 	if csp := recRoot.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") || strings.Contains(csp, "cdn.tailwindcss.com") {
 		t.Fatalf("CSP not locked down: %q", recRoot.Header().Get("Content-Security-Policy"))
@@ -229,19 +229,19 @@ func TestListenAddrLocalAndVercel(t *testing.T) {
 	t.Setenv("VERCEL", "")
 	t.Setenv("VERCEL_ENV", "")
 	t.Setenv("AEGIS_ADDR", "")
-	addr, err := listenAddr()
+	addr, err := ListenAddr()
 	if err != nil || addr != defaultBindAddr {
 		t.Fatalf("default addr = %q %v", addr, err)
 	}
 
 	t.Setenv("AEGIS_ADDR", "0.0.0.0:8090")
-	if _, err := listenAddr(); err == nil {
+	if _, err := ListenAddr(); err == nil {
 		t.Fatal("expected loopback policy to reject 0.0.0.0")
 	}
 
 	t.Setenv("VERCEL", "1")
 	t.Setenv("PORT", "8080")
-	addr, err = listenAddr()
+	addr, err = ListenAddr()
 	if err != nil || addr != ":8080" {
 		t.Fatalf("vercel addr = %q %v", addr, err)
 	}
@@ -264,17 +264,11 @@ func TestVercelRejectsBrowserKey(t *testing.T) {
 		t.Fatal("hosted POST /api/key must not store a key")
 	}
 
-	root := httptest.NewRequest(http.MethodGet, "/", nil)
-	rootRec := httptest.NewRecorder()
-	handler.ServeHTTP(rootRec, root)
-	if rootRec.Code != http.StatusOK {
-		t.Fatalf("GET / = %d", rootRec.Code)
-	}
-	if strings.Contains(rootRec.Body.String(), `id="key-form"`) {
-		t.Fatal("hosted studio must hide the browser key form")
-	}
-	if !strings.Contains(rootRec.Body.String(), "Vercel edition") {
-		t.Fatal("expected Vercel folio")
+	health := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRec := httptest.NewRecorder()
+	handler.ServeHTTP(healthRec, health)
+	if healthRec.Code != http.StatusOK || !strings.Contains(healthRec.Body.String(), `"hosted":true`) {
+		t.Fatalf("hosted healthz = %d %s", healthRec.Code, healthRec.Body.String())
 	}
 }
 

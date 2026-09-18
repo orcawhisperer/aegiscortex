@@ -1,4 +1,4 @@
-package main
+package aegiscortex
 
 import (
 	"github.com/orcawhisperer/typesafe-sdk-go"
