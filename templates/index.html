@@ -1,309 +1,170 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{ .Title }}</title>
-  <!-- Tailwind CSS + Bootstrap Icons + Local Fallback CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-sky-500/30 selection:text-sky-200">
-  <!-- Sticky Top Navigation Bar -->
-  <header class="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-900/90 backdrop-blur-md px-6 py-3.5 flex flex-wrap items-center justify-between gap-4">
-    <div class="flex items-center gap-4">
-      <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gradient-to-r from-sky-500/20 via-indigo-500/20 to-emerald-500/20 border border-sky-400/40 font-mono font-extrabold tracking-wider text-base shadow-sm">
-        <i class="bi bi-shield-check text-sky-400"></i>
-        <span>AEGIS<span class="text-sky-400">CORTEX</span></span>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3l7 3v6c0 4.5-2.8 7.8-7 9-4.2-1.2-7-4.5-7-9V6l7-3z" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M8.5 12.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
       </div>
-      <div class="text-xs sm:text-sm text-slate-400">
-        <span class="font-semibold text-slate-200">100ms Speculative Control Plane</span> &bull;
-        3-Tier Economic Arbitrage &bull;
-        Powered by <code class="text-sky-400 font-mono bg-slate-800/80 px-1.5 py-0.5 rounded">typesafe-sdk-go v0.6.0</code> &amp; <code class="text-emerald-400 font-mono bg-slate-800/80 px-1.5 py-0.5 rounded">Jev-1.13</code>
+      <div>
+        <div class="brand-name">Aegis<span>Cortex</span></div>
+        <div class="brand-sub">Speculative control plane · typesafe-sdk-go v0.6.0 · Jev-1.13</div>
       </div>
     </div>
-
-    <div class="flex items-center gap-3">
-      <div id="mode-indicator" class="mode-pill {{ if .HasAPIKey }}mode-live{{ else }}mode-sim{{ end }} flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold border">
-        <i class="bi bi-cpu-fill"></i>
-        <span id="mode-text">{{ if .HasAPIKey }}LIVE TYPESAFE API (JEV-1.13){{ else }}CALIBRATED JEV-1.13 RLCD ENGINE{{ end }}</span>
+    <div class="topbar-actions">
+      <div id="mode-indicator" class="mode-pill {{ if .HasAPIKey }}mode-live{{ else }}mode-sim{{ end }}">
+        <span class="mode-dot" aria-hidden="true"></span>
+        <span id="mode-text">{{ if .HasAPIKey }}Live TypeSafe API{{ else }}Calibrated simulator{{ end }}</span>
       </div>
-
-      <div class="flex items-center gap-2">
-        <input
-          id="api-key-input"
-          type="password"
-          placeholder="TYPESAFE_API_KEY (in-memory)"
-          autocomplete="off"
-          class="bg-slate-950/90 border border-slate-700/80 focus:border-sky-400 focus:outline-none text-slate-100 px-3 py-1.5 rounded-lg text-xs font-mono w-56"
-        />
-        <button
-          id="save-key-btn"
-          type="button"
-          class="bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 hover:border-sky-400/60 px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5"
-        >
-          <i class="bi bi-key-fill text-sky-400"></i>
-          <span>Set Key</span>
-        </button>
-      </div>
+      <form id="key-form" class="key-form" autocomplete="off">
+        <label class="sr-only" for="api-key-input">TypeSafe API key</label>
+        <input id="api-key-input" type="password" name="api_key" placeholder="TYPESAFE_API_KEY" spellcheck="false" />
+        <button id="save-key-btn" type="submit">Set key</button>
+      </form>
     </div>
   </header>
 
-  <main class="max-w-[1720px] mx-auto px-6 py-5 space-y-5">
-    <!-- Top 5 KPI FinOps & Calibration Telemetry Cards (Server-Rendered via Go html/template + Live Updated) -->
-    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-      <div class="kpi-card bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400 font-semibold">
-          <span>Control Plane Latency</span>
-          <i class="bi bi-lightning-charge-fill text-sky-400"></i>
-        </div>
-        <strong id="kpi-latency" class="kpi-value text-2xl font-mono font-extrabold text-sky-400 mt-1 block">
-          {{ printf "%.0f ms" .InitialEval.Cascade.AegisControlLatencyMs }}
-        </strong>
-        <span class="text-xs font-mono text-slate-500">11 Questions &bull; Shared KV Cache</span>
-      </div>
-
-      <div class="kpi-card bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400 font-semibold">
-          <span>Jev-1.13 Fan-Out Cost</span>
-          <i class="bi bi-coin text-emerald-400"></i>
-        </div>
-        <strong id="kpi-jev-cost" class="kpi-value text-2xl font-mono font-extrabold text-emerald-400 mt-1 block">
-          ${{ printf "%.6f" .InitialEval.Cascade.AegisControlCostUSD }}
-        </strong>
-        <span class="text-xs font-mono text-slate-500">$0.042/1M Input &bull; $0.00 Output</span>
-      </div>
-
-      <div class="kpi-card bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400 font-semibold">
-          <span>Blended FinOps Savings</span>
-          <i class="bi bi-graph-down-arrow text-emerald-400"></i>
-        </div>
-        <strong id="kpi-savings-pct" class="kpi-value text-2xl font-mono font-extrabold text-emerald-400 mt-1 block">
-          {{ printf "%.1f%%" .InitialEval.Cascade.CostSavingsPercent }}
-        </strong>
-        <span id="kpi-savings-sub" class="text-xs font-mono text-slate-500">
-          vs ${{ printf "%.6f" .InitialEval.Cascade.NaiveFrontierCostUSD }} Naive Frontier
-        </span>
-      </div>
-
-      <div class="kpi-card bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400 font-semibold">
-          <span>Composite Quality Gate</span>
-          <i class="bi bi-sliders2-vertical text-purple-400"></i>
-        </div>
-        <strong id="kpi-composite" class="kpi-value text-2xl font-mono font-extrabold text-purple-400 mt-1 block">
-          {{ printf "%.1f / 100" .InitialEval.CompositeScore }}
-        </strong>
-        <span id="kpi-route-tier" class="text-xs font-mono text-slate-400">
-          {{ .InitialEval.FinalRouteTier }}
-        </span>
-      </div>
-
-      <div class="kpi-card bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400 font-semibold">
-          <span>Calibration Flywheel</span>
-          <i class="bi bi-arrow-repeat text-amber-400"></i>
-        </div>
-        <strong id="kpi-flywheel" class="kpi-value text-2xl font-mono font-extrabold text-amber-400 mt-1 block">
-          {{ .Flywheel.DistilledGoldenExamples }} Distilled
-        </strong>
-        <span id="kpi-flywheel-sub" class="text-xs font-mono text-slate-500">
-          {{ .Flywheel.Tier0BlockedOrAuto }} Blocked &bull; {{ .Flywheel.Tier2SurgicalEscalations }} Surgical Repairs
-        </span>
-      </div>
+  <main class="workspace">
+    <section class="kpi-strip" aria-label="FinOps telemetry">
+      <article class="kpi">
+        <span class="kpi-label">Wall-clock latency</span>
+        <strong id="kpi-latency" class="kpi-value accent-cyan">{{ printf "%.0f ms" .InitialEval.LatencyMs }}</strong>
+        <span id="kpi-latency-sub" class="kpi-sub">Live Jev P50 reference {{ printf "%.0f ms" .InitialEval.Cascade.ReferenceJevP50Ms }}</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Fan-out cost</span>
+        <strong id="kpi-jev-cost" class="kpi-value accent-emerald">${{ printf "%.6f" .InitialEval.Cascade.AegisControlCostUSD }}</strong>
+        <span class="kpi-sub">$0.042 / 1M input · $0.00 output</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Modeled savings</span>
+        <strong id="kpi-savings-pct" class="kpi-value accent-emerald">{{ printf "%.1f%%" .InitialEval.Cascade.CostSavingsPercent }}</strong>
+        <span id="kpi-savings-sub" class="kpi-sub">vs ${{ printf "%.5f" .InitialEval.Cascade.NaiveFrontierCostUSD }} unrouted frontier</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Composite quality</span>
+        <strong id="kpi-composite" class="kpi-value accent-violet">{{ printf "%.1f / 100" .InitialEval.CompositeScore }}</strong>
+        <span id="kpi-route-tier" class="kpi-sub">{{ .InitialEval.FinalRouteTier }}</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Calibration flywheel</span>
+        <strong id="kpi-flywheel" class="kpi-value accent-amber">{{ .Flywheel.DistilledGoldenExamples }} runs</strong>
+        <span id="kpi-flywheel-sub" class="kpi-sub">{{ .Flywheel.GuardrailsBlocked }} blocked · {{ .Flywheel.AutoExecuted }} auto</span>
+      </article>
     </section>
 
-    <!-- Main 2-Column Interactive Control Plane Layout -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-      <!-- Left Column (4 cols): Scenarios, Threshold Sliders, & Shared Context Editor -->
-      <aside class="lg:col-span-4 bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-5 shadow-md">
-        <div>
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <i class="bi bi-collection-play-fill text-sky-400"></i>
-              <span>1. Enterprise Traffic Scenarios</span>
-            </h2>
-            <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">One-Click Presets</span>
+    <div class="layout">
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>1. Traffic scenarios</h2>
+          <span class="chip">Engine-routed</span>
+        </div>
+        <div id="scenario-list" class="scenario-list"></div>
+
+        <div class="section-divider">
+          <div class="panel-head">
+            <h2>2. Gate thresholds (τ)</h2>
+            <button id="apply-recommended" type="button" class="btn-quiet">Apply recommended</button>
           </div>
-          <!-- Server-rendered scenario cards via Go html/template + JS event binding -->
-          <div id="scenario-list" class="space-y-2.5">
-            {{ range .Presets }}
-            <button
-              type="button"
-              data-scenario-id="{{ .ID }}"
-              class="scenario-btn w-full text-left p-3 rounded-lg bg-slate-950/80 border border-slate-800 hover:border-sky-400/60 transition group"
-            >
-              <div class="flex items-center justify-between mb-1">
-                <span class="font-bold text-xs text-slate-100 group-hover:text-sky-300">{{ .Title }}</span>
-                <span class="font-mono text-[10px] px-2 py-0.5 rounded bg-sky-500/15 text-sky-300">{{ .Badge }}</span>
-              </div>
-              <p class="text-xs text-slate-400 leading-relaxed">{{ .Description }}</p>
-            </button>
-            {{ end }}
+          <div class="sliders">
+            <label class="slider-row">
+              <span>Security gate <strong id="val-security">{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}</strong></span>
+              <input id="slider-security" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}" />
+            </label>
+            <label class="slider-row">
+              <span>Field verify <strong id="val-field">{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}</strong></span>
+              <input id="slider-field" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}" />
+            </label>
+            <label class="slider-row">
+              <span>Router confidence <strong id="val-router">{{ printf "%.2f" .Thresholds.RouterConfidence }}</strong></span>
+              <input id="slider-router" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.RouterConfidence }}" />
+            </label>
+            <label class="slider-row">
+              <span>Composite score <strong id="val-composite">{{ printf "%.0f" .Thresholds.CompositePassThreshold }}</strong></span>
+              <input id="slider-composite" type="range" min="30" max="95" step="1" value="{{ printf "%.0f" .Thresholds.CompositePassThreshold }}" />
+            </label>
           </div>
+          <p id="recommended-line" class="hint"></p>
         </div>
 
-        <div class="pt-4 border-t border-slate-800/80">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <i class="bi bi-Sliders text-emerald-400"></i>
-              <span>2. RLCD Calibrated Gate Thresholds (&tau;)</span>
-            </h2>
-            <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Bayesian Calibrated</span>
+        <div class="section-divider">
+          <div class="panel-head">
+            <h2>3. Shared context</h2>
+            <button id="run-eval-btn" type="button" class="btn-primary">Run fan-out</button>
           </div>
-
-          <div class="space-y-3 bg-slate-950/60 p-3.5 rounded-lg border border-slate-800/80">
-            <div>
-              <div class="flex justify-between text-xs text-slate-300 mb-1">
-                <label for="slider-security">Security Gate Confidence (&tau;<sub>sec</sub>)</label>
-                <span id="val-security" class="font-mono font-bold text-sky-400">{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}</span>
-              </div>
-              <input id="slider-security" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.SecurityGateConfidence }}" class="w-full accent-sky-400" />
-            </div>
-
-            <div>
-              <div class="flex justify-between text-xs text-slate-300 mb-1">
-                <label for="slider-field">Per-Field Verification (&tau;<sub>field</sub>)</label>
-                <span id="val-field" class="font-mono font-bold text-sky-400">{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}</span>
-              </div>
-              <input id="slider-field" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.FieldVerifyConfidence }}" class="w-full accent-sky-400" />
-            </div>
-
-            <div>
-              <div class="flex justify-between text-xs text-slate-300 mb-1">
-                <label for="slider-router">Router Confidence (&tau;<sub>route</sub>)</label>
-                <span id="val-router" class="font-mono font-bold text-sky-400">{{ printf "%.2f" .Thresholds.RouterConfidence }}</span>
-              </div>
-              <input id="slider-router" type="range" min="0.50" max="0.99" step="0.01" value="{{ printf "%.2f" .Thresholds.RouterConfidence }}" class="w-full accent-sky-400" />
-            </div>
-
-            <div>
-              <div class="flex justify-between text-xs text-slate-300 mb-1">
-                <label for="slider-composite">Composite Score Gate</label>
-                <span id="val-composite" class="font-mono font-bold text-sky-400">{{ printf "%.1f" .Thresholds.CompositePassThreshold }}</span>
-              </div>
-              <input id="slider-composite" type="range" min="30" max="95" step="1" value="{{ printf "%.0f" .Thresholds.CompositePassThreshold }}" class="w-full accent-sky-400" />
-            </div>
-          </div>
-        </div>
-
-        <div class="pt-4 border-t border-slate-800/80">
-          <div class="flex items-center justify-between mb-2.5">
-            <h2 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <i class="bi bi-braces-asterisk text-purple-400"></i>
-              <span>3. Shared KV Context Payload</span>
-            </h2>
-            <button
-              id="run-eval-btn"
-              type="button"
-              class="bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold shadow transition flex items-center gap-1.5"
-            >
-              <i class="bi bi-play-fill"></i>
-              <span>Execute 11-Q Fan-Out</span>
-            </button>
-          </div>
-          <textarea
-            id="context-editor"
-            spellcheck="false"
-            class="w-full h-60 bg-slate-950 text-slate-200 border border-slate-800 focus:border-sky-400 focus:outline-none rounded-lg p-3 font-mono text-xs leading-relaxed"
-          >{{ .InitialContextJSON }}</textarea>
-          <div id="status-banner" class="mt-2.5 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800/80 font-mono text-xs text-slate-400">
-            Ready. 11 questions bound via typesafe-sdk-go.
-          </div>
+          <label class="sr-only" for="context-editor">JSON context payload</label>
+          <textarea id="context-editor" spellcheck="false">{{ .InitialContextJSON }}</textarea>
+          <div id="status-banner" class="status" role="status">Hydrating from server boot payload.</div>
         </div>
       </aside>
 
-      <!-- Right Column (8 cols): Active 3-Tier Cascade Decision + Per-Field Verification + 11-Q Matrix -->
-      <section class="lg:col-span-8 space-y-5">
-        <!-- Active Control Plane Decision Card -->
-        <div class="bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-sky-500/40 rounded-xl p-5 shadow-lg">
-          <div class="flex flex-wrap items-center justify-between gap-3 mb-2">
+      <section class="stack">
+        <article class="decision">
+          <div class="decision-top">
             <div>
-              <span class="text-[11px] font-mono uppercase tracking-widest text-sky-400 font-bold">
-                ACTIVE 3-TIER ECONOMIC ARBITRAGE DECISION
-              </span>
-              <h3 id="decision-tier-title" class="text-xl font-mono font-extrabold text-white mt-0.5">
-                {{ .InitialEval.FinalRouteTier }}
-              </h3>
+              <p class="eyebrow">3-tier route (from engine verdict)</p>
+              <h3 id="decision-tier-title">{{ .InitialEval.FinalRouteTier }}</h3>
             </div>
-            <div id="decision-badge" class="tier-pill tier-fastpath font-mono text-xs font-bold px-3 py-1.5 rounded-lg">
-              {{ .InitialEval.FinalRouteTier }}
+            <div id="decision-badge" class="tier-pill">{{ .InitialEval.FinalRouteTier }}</div>
+          </div>
+          <p id="decision-rationale" class="rationale">{{ .InitialEval.FinalDecision }}</p>
+          <p id="failed-fields-line" class="hint"></p>
+          <div class="arch-grid">
+            <div class="arch">
+              <span>Naive frontier + judge</span>
+              <strong id="arch-naive-cost">${{ printf "%.6f" .InitialEval.Cascade.NaiveFrontierCostUSD }}</strong>
+              <em id="arch-naive-lat">{{ printf "%.0f ms" .InitialEval.Cascade.NaiveFrontierLatencyMs }}</em>
+            </div>
+            <div class="arch">
+              <span>Legacy prompt router</span>
+              <strong id="arch-legacy-cost">${{ printf "%.6f" .InitialEval.Cascade.LegacyRouterCostUSD }}</strong>
+              <em id="arch-legacy-lat">{{ printf "%.0f ms" .InitialEval.Cascade.LegacyRouterLatencyMs }}</em>
+            </div>
+            <div class="arch arch-aegis">
+              <span>AegisCortex blended</span>
+              <strong id="arch-aegis-cost">${{ printf "%.6f" .InitialEval.Cascade.AegisBlendedCostUSD }}</strong>
+              <em id="arch-aegis-lat">{{ printf "%.0f ms" .InitialEval.Cascade.AegisTotalLatencyMs }} wall-clock</em>
             </div>
           </div>
+        </article>
 
-          <p id="decision-rationale" class="text-sm text-slate-300 leading-relaxed mb-4">
-            {{ .InitialEval.FinalDecision }}
-          </p>
-
-          <!-- 3-Way Architecture Cost & Latency Comparison -->
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div class="bg-slate-950/80 border border-slate-800 rounded-lg p-3.5">
-              <div class="text-xs text-slate-400 font-semibold flex items-center justify-between">
-                <span>1. Naive Frontier LLM + Judge</span>
-                <i class="bi bi-exclamation-Octagon text-rose-400"></i>
-              </div>
-              <div class="font-mono text-sm font-bold text-slate-200 mt-1">
-                <strong id="arch-naive-cost" class="text-rose-400">${{ printf "%.6f" .InitialEval.Cascade.NaiveFrontierCostUSD }}</strong>
-                &bull; <span id="arch-naive-lat">{{ printf "%.0f ms" .InitialEval.Cascade.NaiveFrontierLatencyMs }}</span>
-              </div>
-              <div class="text-[11px] text-slate-500 mt-0.5">100% GPT-5.4 + Serial LLM-as-a-Judge</div>
-            </div>
-
-            <div class="bg-slate-950/80 border border-slate-800 rounded-lg p-3.5">
-              <div class="text-xs text-slate-400 font-semibold flex items-center justify-between">
-                <span>2. Legacy Router (Martian / Lakera)</span>
-                <i class="bi bi-eye-slash text-amber-400"></i>
-              </div>
-              <div class="font-mono text-sm font-bold text-slate-200 mt-1">
-                <strong id="arch-legacy-cost" class="text-amber-400">${{ printf "%.6f" .InitialEval.Cascade.LegacyRouterCostUSD }}</strong>
-                &bull; <span id="arch-legacy-lat">{{ printf "%.0f ms" .InitialEval.Cascade.LegacyRouterLatencyMs }}</span>
-              </div>
-              <div class="text-[11px] text-slate-500 mt-0.5">Prompt-level only &bull; Blind to field hallucinations</div>
-            </div>
-
-            <div class="bg-emerald-950/25 border border-emerald-500/50 rounded-lg p-3.5">
-              <div class="text-xs text-emerald-300 font-semibold flex items-center justify-between">
-                <span>3. AegisCortex (Jev-1.13 Cascade)</span>
-                <i class="bi bi-check-circle-fill text-emerald-400"></i>
-              </div>
-              <div class="font-mono text-sm font-bold text-white mt-1">
-                <strong id="arch-aegis-cost" class="text-emerald-400">${{ printf "%.6f" .InitialEval.Cascade.AegisBlendedCostUSD }}</strong>
-                &bull; <span id="arch-aegis-lat">{{ printf "%.0f ms" .InitialEval.Cascade.AegisTotalLatencyMs }}</span>
-              </div>
-              <div class="text-[11px] text-emerald-300/80 mt-0.5">11-Q Fan-Out + Per-Field Surgical Verification</div>
-            </div>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Per-field verification</h2>
+            <span class="chip">From noul answers</span>
           </div>
-        </div>
+          <div id="field-verifications-grid" class="field-grid"></div>
+        </article>
 
-        <!-- Per-Field Structured Verification Gate (BindQuestions) -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-md">
-          <div class="flex items-center justify-between mb-3.5">
-            <h2 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <i class="bi bi-patch-check-fill text-emerald-400"></i>
-              <span>Per-Field Structured Verification Gate (<code class="text-sky-400 font-mono">typesafe.BindQuestions</code>)</span>
-            </h2>
-            <span class="text-xs font-mono px-2.5 py-0.5 rounded bg-slate-800 text-slate-300">Surgical Field Escalation Moat</span>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>11-question fan-out</h2>
+            <span class="chip">BindQuestions</span>
           </div>
-          <div id="field-verifications-grid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3"></div>
-        </div>
+          <div id="questions-matrix" class="q-grid"></div>
+        </article>
 
-        <!-- 11-Question Speculative Fan-Out Matrix -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-md">
-          <div class="flex items-center justify-between mb-3.5">
-            <h2 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <i class="bi bi-grid-3x3-gap-fill text-sky-400"></i>
-              <span>11-Question Parallel Speculative Fan-Out Matrix (Single <code class="text-sky-400 font-mono">system_one</code> Call)</span>
-            </h2>
-            <span class="text-xs font-mono px-2.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">$0.00 Output Token Billing</span>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Recent routes</h2>
+            <span class="chip">In-memory</span>
           </div>
-          <div id="questions-matrix" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
-        </div>
+          <div id="history-list" class="history"></div>
+        </article>
       </section>
     </div>
   </main>
 
+  <script id="boot-data" type="application/json">{{ .BootJSON }}</script>
   <script src="/static/app.js"></script>
 </body>
 </html>

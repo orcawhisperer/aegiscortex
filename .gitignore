@@ -1,0 +1,14 @@
+# Binaries
+/aegiscortex
+*.exe
+*.test
+*.out
+
+# Env
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
