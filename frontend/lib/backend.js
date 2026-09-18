@@ -36,9 +36,10 @@ export async function fetchBackend(path, init = {}) {
   return data;
 }
 
-export async function loadStudioBoot() {
+export async function loadStudioBoot(caseId) {
   try {
-    const boot = await fetchBackend("/boot");
+    const q = caseId ? `?case=${encodeURIComponent(caseId)}` : "";
+    const boot = await fetchBackend(`/boot${q}`);
     return { state: boot.state || null, eval: boot.eval || null, error: null };
   } catch (err) {
     return { state: null, eval: null, error: err.message };

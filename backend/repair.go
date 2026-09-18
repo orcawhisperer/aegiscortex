@@ -19,16 +19,26 @@ type FieldPatch struct {
 	Evidence string `json:"evidence"`
 }
 
+// FrozenField is a Jev-locked extraction that must not be regenerated.
+type FrozenField struct {
+	Field   string  `json:"field"`
+	YesProb float64 `json:"yes_prob"`
+	Value   any     `json:"value,omitempty"`
+}
+
 // SurgicalPatch is the Tier-2 repair artifact: prompt, locked JSON, spliced result.
 type SurgicalPatch struct {
-	FailedFields   []string       `json:"failed_fields"`
-	Prompt         string         `json:"prompt"`
-	TokenBudget    int            `json:"token_budget"`
-	LockedJSON     map[string]any `json:"locked_json"`
-	RepairedJSON   map[string]any `json:"repaired_json"`
-	Patches        []FieldPatch   `json:"patches"`
-	ModeledCostUSD float64        `json:"modeled_cost_usd"`
-	Executed       bool           `json:"executed"`
+	FailedFields    []string       `json:"failed_fields"`
+	Prompt          string         `json:"prompt"`
+	MicroPrompt     string         `json:"micro_prompt"`
+	TokenBudget     int            `json:"token_budget"`
+	FullRetryTokens int            `json:"full_retry_tokens"`
+	FrozenFields    []FrozenField  `json:"frozen_fields,omitempty"`
+	LockedJSON      map[string]any `json:"locked_json"`
+	RepairedJSON    map[string]any `json:"repaired_json"`
+	Patches         []FieldPatch   `json:"patches"`
+	ModeledCostUSD  float64        `json:"modeled_cost_usd"`
+	Executed        bool           `json:"executed"`
 }
 
 func extractionObject(state any) map[string]any {
@@ -120,16 +130,51 @@ func buildSurgicalPatch(state any, failed []string, fieldViews []FieldVerificati
 	}
 
 	prompt := surgicalPrompt(source, lockedOnly, failed)
-	return &SurgicalPatch{
-		FailedFields:   failed,
-		Prompt:         prompt,
-		TokenBudget:    120,
-		LockedJSON:     lockedOnly,
-		RepairedJSON:   repaired,
-		Patches:        patches,
-		ModeledCostUSD: modeledFrontierUSD,
-		Executed:       len(patches) > 0,
+	micro := microRepairPrompt(source, failed, patches)
+	frozen := make([]FrozenField, 0, len(fieldViews))
+	for _, fv := range fieldViews {
+		if !fv.Verified {
+			continue
+		}
+		frozen = append(frozen, FrozenField{
+			Field:   fv.FieldName,
+			YesProb: fv.YesProb,
+			Value:   firstValue(locked, fv.FieldName),
+		})
 	}
+	return &SurgicalPatch{
+		FailedFields:    failed,
+		Prompt:          prompt,
+		MicroPrompt:     micro,
+		TokenBudget:     tokenEstimate(micro),
+		FullRetryTokens: 1420,
+		FrozenFields:    frozen,
+		LockedJSON:      lockedOnly,
+		RepairedJSON:    repaired,
+		Patches:         patches,
+		ModeledCostUSD:  modeledFrontierUSD,
+		Executed:        len(patches) > 0,
+	}
+}
+
+func tokenEstimate(s string) int {
+	n := len(strings.Fields(s))
+	if n < 12 {
+		return 12
+	}
+	return n
+}
+
+func microRepairPrompt(source string, failed []string, patches []FieldPatch) string {
+	clip := source
+	if len(clip) > 180 {
+		clip = clip[:180] + "…"
+	}
+	target := strings.Join(failed, ", ")
+	if len(patches) > 0 {
+		target = patches[0].Field
+	}
+	return fmt.Sprintf("Given %q, compute only %s. Do not regenerate locked fields.", clip, target)
 }
 
 func failedMatches(failed []string, key string) bool {

@@ -111,10 +111,14 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 		presets := engine.GetPresets()
 		var first ScenarioPreset
+		wantCase := strings.TrimSpace(r.URL.Query().Get("case"))
 		for _, p := range presets {
-			if p.ID == "rag_verified_fastpath" {
+			if wantCase != "" && p.ID == wantCase {
 				first = p
 				break
+			}
+			if wantCase == "" && p.ID == "rag_verified_fastpath" {
+				first = p
 			}
 		}
 		if first.ID == "" && len(presets) > 0 {
@@ -173,7 +177,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			"title":      compiled.Title,
 			"type":       "object",
 			"properties": schemaProperties(compiled),
-		})
+		}, nil)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"title":          compiled.Title,
 			"fields":         compiled.Fields,
@@ -209,7 +213,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			return
 		}
 		if !engine.AllowEvaluate(requestIP(r)) {
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "live evaluate rate limit (20/min) — protect TYPESAFE_API_KEY quota"})
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "live evaluate rate limit (20/min) — protect AEGIS_ENGINE_KEY quota"})
 			return
 		}
 		var req EvaluationRequest
@@ -248,7 +252,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 		if !allowBrowserKeyHold(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "API key hold is loopback-only. On Vercel or any :PORT bind, set TYPESAFE_API_KEY in the process environment.",
+				"error": "API key hold is loopback-only. On Vercel or any :PORT bind, set AEGIS_ENGINE_KEY in the process environment.",
 			})
 			return
 		}
@@ -268,6 +272,26 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			"has_api_key": engine.HasAPIKey(),
 			"mode":        mode,
 		})
+	})
+
+	mux.HandleFunc("/api/backtest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req BacktestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backtest payload"})
+			return
+		}
+		btx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		report, err := engine.RunBacktest(btx, req)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "backtest failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
 	})
 
 	return SecurityHeadersMiddleware(mux), nil

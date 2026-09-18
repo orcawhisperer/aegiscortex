@@ -214,6 +214,24 @@ func TestHTTPServerSecurityAndEvaluate(t *testing.T) {
 	if healthRec.Code != http.StatusOK {
 		t.Fatalf("healthz = %d", healthRec.Code)
 	}
+
+	boot := httptest.NewRequest(http.MethodGet, "/api/boot?case=sde_hallucinated_date", nil)
+	bootRec := httptest.NewRecorder()
+	handler.ServeHTTP(bootRec, boot)
+	if bootRec.Code != http.StatusOK {
+		t.Fatalf("boot = %d %s", bootRec.Code, bootRec.Body.String())
+	}
+	if !strings.Contains(bootRec.Body.String(), `"scenario_id":"sde_hallucinated_date"`) {
+		t.Fatalf("boot permalink missed case: %s", bootRec.Body.String())
+	}
+
+	btReq := httptest.NewRequest(http.MethodPost, "/api/backtest", strings.NewReader(`{"synthetic":4,"monthly_volume":10000000}`))
+	btReq.Header.Set("Content-Type", "application/json")
+	btRec := httptest.NewRecorder()
+	handler.ServeHTTP(btRec, btReq)
+	if btRec.Code != http.StatusOK || !strings.Contains(btRec.Body.String(), `"turns":4`) {
+		t.Fatalf("backtest = %d %s", btRec.Code, btRec.Body.String())
+	}
 }
 
 func TestInspectStateHallucination(t *testing.T) {
@@ -471,6 +489,52 @@ func TestSolverMeetsEscapeSLA(t *testing.T) {
 	}
 	if solved.EscapeRate > 0.001 {
 		t.Fatalf("escape rate %.4f exceeds SLA", solved.EscapeRate)
+	}
+}
+
+func TestInferExtraFieldsAndBacktest(t *testing.T) {
+	ctx := map[string]any{
+		"source_document": "Governing law is the State of Delaware. Payment terms are net 30.",
+		"mini_model_extraction": map[string]any{
+			"vendor_name":          "Northwind Analytics LLC",
+			"contract_value_usd":   120000,
+			"effective_date":       "11/01/2025",
+			"notice_deadline_date": "09/15/2026",
+			"auto_renews":          true,
+			"governing_law":        "State of Delaware",
+			"payment_terms_days":   30,
+		},
+	}
+	extra := InferExtraFields(ctx)
+	if len(extra) < 2 {
+		t.Fatalf("expected extra fields for governing_law / payment_terms, got %+v", extra)
+	}
+	engine := NewCortexEngineWithKey("")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{Context: ctx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.QuestionCount < 12 {
+		t.Fatalf("extra payload keys should expand fan-out, got %d", res.QuestionCount)
+	}
+	if res.AuditHash == "" || res.Scorer != "aegis_calibrated_simulator" {
+		t.Fatalf("audit/scorer missing: hash=%s scorer=%s", res.AuditHash, res.Scorer)
+	}
+
+	report, err := engine.RunBacktest(context.Background(), BacktestRequest{Synthetic: 8, MonthlyVolume: 10_000_000})
+	if err != nil || report.Turns != 8 {
+		t.Fatalf("backtest = %+v %v", report, err)
+	}
+	if report.MonthlyBaselineUSD <= report.MonthlyAegisUSD {
+		t.Fatalf("expected modeled monthly savings: %+v", report)
+	}
+}
+
+func TestEngineKeyPrefersAegis(t *testing.T) {
+	t.Setenv("TYPESAFE_API_KEY", "legacy")
+	t.Setenv("AEGIS_ENGINE_KEY", "first-party")
+	if got := EngineKeyFromEnv(); got != "first-party" {
+		t.Fatalf("EngineKeyFromEnv = %q", got)
 	}
 }
 

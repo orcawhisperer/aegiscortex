@@ -1,6 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { replayRuling, raceModel } from "../lib/decide-route.cjs";
+import { exportSnippets } from "../lib/export-sdk";
+import { highlightPayload, needleForRow } from "../lib/highlight";
+import { writeStudioURL, sha256Hex } from "../lib/permalink";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/svc/api";
 
@@ -27,7 +31,7 @@ function money(n) {
   return `$${(n || 0).toFixed(6)}`;
 }
 
-function Table({ caption, headers, rows, rowClasses }) {
+function Table({ caption, headers, rows, rowClasses, onRowClick }) {
   return (
     <table>
       {caption ? <caption>{caption}</caption> : null}
@@ -40,7 +44,12 @@ function Table({ caption, headers, rows, rowClasses }) {
       </thead>
       <tbody>
         {rows.map((cells, i) => (
-          <tr key={i} className={rowClasses?.[i] || ""}>
+          <tr
+            key={i}
+            className={rowClasses?.[i] || ""}
+            onClick={onRowClick ? () => onRowClick(i) : undefined}
+            style={onRowClick ? { cursor: "pointer" } : undefined}
+          >
             {cells.map((c, j) => (
               <td key={j}>{c}</td>
             ))}
@@ -59,43 +68,22 @@ function firstPreset(presets, preferred) {
   );
 }
 
-function caseFromURL() {
-  if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("case") || "";
-}
-
-function writeCaseURL(id) {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  url.searchParams.set("case", id);
-  window.history.replaceState({}, "", url);
-}
-
-export default function Studio({ boot }) {
+export default function Studio({ boot, permalink }) {
   const initial = boot?.state;
-  const preferred = caseFromURL();
-  const first = firstPreset(initial?.presets, preferred);
+  const first = firstPreset(initial?.presets, permalink?.case);
   const [hosted, setHosted] = useState(Boolean(initial?.hosted));
   const [presets, setPresets] = useState(initial?.presets || []);
   const [activeId, setActiveId] = useState(first?.id || "rag_verified_fastpath");
-  const [thresholds, setThresholds] = useState(
-    initial?.thresholds || {
-      security_gate_confidence: 0.65,
-      field_verify_confidence: 0.75,
-      router_confidence: 0.8,
-      composite_pass_threshold: 68,
-    }
-  );
-  const [contextJSON, setContextJSON] = useState(
-    first ? JSON.stringify(first.context, null, 2) : "{}"
-  );
-  const [evalRes, setEvalRes] = useState(boot?.eval || null);
+  const [thresholds, setThresholds] = useState(permalink?.thresholds || initial?.thresholds || {
+    security_gate_confidence: 0.65,
+    field_verify_confidence: 0.75,
+    router_confidence: 0.8,
+    composite_pass_threshold: 68,
+  });
+  const [contextJSON, setContextJSON] = useState(first ? JSON.stringify(first.context, null, 2) : "{}");
+  const [rawEval, setRawEval] = useState(boot?.eval || null);
   const [status, setStatus] = useState(
-    boot?.eval
-      ? "Ready. Routing is computed from the payload, not from the case name."
-      : boot?.error
-        ? "Server could not reach Gin. Retrying in the browser…"
-        : "Loading studio…"
+    boot?.eval ? "Ready. τ replay is local. Evaluate only when the payload changes." : boot?.error ? "Server could not reach Gin. Retrying…" : "Loading studio…"
   );
   const [statusError, setStatusError] = useState(Boolean(boot?.error && !boot?.eval));
   const [keyValue, setKeyValue] = useState("");
@@ -104,26 +92,30 @@ export default function Studio({ boot }) {
   const [compiled, setCompiled] = useState(null);
   const [useSchema, setUseSchema] = useState(false);
   const [escapeRate, setEscapeRate] = useState(0.001);
-  const thresholdTimer = useRef(null);
+  const [highlight, setHighlight] = useState("");
+  const [portfolio, setPortfolio] = useState(null);
+  const [sdkLang, setSdkLang] = useState("go");
+  const [backtest, setBacktest] = useState(null);
+  const [printHash, setPrintHash] = useState("");
   const evalAbort = useRef(null);
   const [pending, startTransition] = useTransition();
 
+  const evalRes = useMemo(() => replayRuling(rawEval, thresholds) || rawEval, [rawEval, thresholds]);
   const modeLabel = useMemo(() => {
-    if (evalRes?.fallback_used) return "Live failed — simulator";
-    if (evalRes?.mode === "LIVE_TYPESAFE_API") return "Live Jev";
+    if (rawEval?.fallback_used) return "Live failed — simulator";
+    if (rawEval?.mode === "LIVE_TYPESAFE_API") return "Live engine";
     return "Simulator";
-  }, [evalRes]);
+  }, [rawEval]);
+  const live = rawEval?.mode === "LIVE_TYPESAFE_API" && !rawEval?.fallback_used;
 
-  const live = evalRes?.mode === "LIVE_TYPESAFE_API" && !evalRes?.fallback_used;
-
-  const evaluate = useCallback(async (scenarioId, rawJSON) => {
+  const evaluate = useCallback(async (scenarioId, rawJSON, extra = {}) => {
     let parsed = {};
     try {
       parsed = rawJSON.trim() ? JSON.parse(rawJSON) : {};
     } catch (e) {
       setStatusError(true);
       setStatus("Invalid JSON: " + e.message);
-      return;
+      return null;
     }
     if (evalAbort.current) evalAbort.current.abort();
     const controller = new AbortController();
@@ -135,6 +127,7 @@ export default function Studio({ boot }) {
         scenario_id: scenarioId,
         context: parsed,
         thresholds,
+        read_only: Boolean(extra.read_only),
       };
       if (useSchema) {
         try {
@@ -154,35 +147,31 @@ export default function Studio({ boot }) {
       if (!r.ok) {
         setStatusError(true);
         setStatus(data.error || "Evaluation failed");
-        return;
+        return null;
       }
-      startTransition(() => {
-        setEvalRes(data);
-        if (data.flywheel) setFlywheel(data.flywheel);
-      });
-      setStatus(
-        `Route ${data.final_route_tier} in ${data.latency_ms.toFixed(0)} ms · ${data.question_count || data.questions.length} questions · savings ${data.cascade.cost_savings_percent.toFixed(1)}%`
-      );
-      if (data.live_error) {
-        setStatusError(true);
-        setStatus("Live API error, using simulator: " + data.live_error);
+      if (!extra.silent) {
+        startTransition(() => {
+          setRawEval(data);
+          if (data.flywheel) setFlywheel(data.flywheel);
+        });
+        setStatus(`Route ${data.final_route_tier} in ${data.latency_ms.toFixed(0)} ms · ${data.question_count || data.questions.length} heads`);
+        if (data.live_error) {
+          setStatusError(true);
+          setStatus("Live engine error, using simulator: " + data.live_error);
+        }
       }
+      return data;
     } catch (e) {
-      if (e.name === "AbortError") return;
+      if (e.name === "AbortError") return null;
       setStatusError(true);
       setStatus("Evaluation failed: " + e.message);
+      return null;
     }
   }, [schemaText, thresholds, useSchema]);
 
   useEffect(() => {
-    if (boot?.state && preferred) {
-      const preset = firstPreset(boot.state.presets, preferred);
-      if (preset && preset.id !== activeId) {
-        setActiveId(preset.id);
-        setContextJSON(JSON.stringify(preset.context, null, 2));
-      }
-    }
-  }, [boot, preferred, activeId]);
+    writeStudioURL(activeId, thresholds);
+  }, [activeId, thresholds]);
 
   useEffect(() => {
     if (boot?.state) return undefined;
@@ -194,22 +183,20 @@ export default function Studio({ boot }) {
         if (cancelled) return;
         setHosted(Boolean(state.hosted));
         setPresets(state.presets || []);
-        if (state.thresholds) setThresholds(state.thresholds);
         setFlywheel(state.flywheel || null);
-        const preset = firstPreset(state.presets, caseFromURL());
+        const preset = firstPreset(state.presets, permalink?.case);
         if (preset) {
           setActiveId(preset.id);
           const raw = JSON.stringify(preset.context, null, 2);
           setContextJSON(raw);
-          writeCaseURL(preset.id);
           await evaluate(preset.id, raw);
         }
-        setStatus("Ready. Routing is computed from the payload, not from the case name.");
+        setStatus("Ready. τ replay is local.");
         setStatusError(false);
       } catch (e) {
         if (!cancelled) {
           setStatusError(true);
-          setStatus("Could not reach Gin backend at " + BACKEND + ": " + e.message);
+          setStatus("Could not reach control plane at " + BACKEND + ": " + e.message);
         }
       }
     })();
@@ -217,35 +204,13 @@ export default function Studio({ boot }) {
       cancelled = true;
       if (evalAbort.current) evalAbort.current.abort();
     };
-    // CSR recovery runs once when SSR boot failed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boot]);
-
-  async function persistThresholds(next) {
-    setThresholds(next);
-    try {
-      const r = await fetch(`${BACKEND}/thresholds`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(next),
-      });
-      if (!r.ok) {
-        const data = await r.json().catch(() => ({}));
-        setStatusError(true);
-        setStatus(data.error || "Could not persist gates; evaluating with inline τ");
-      }
-    } catch (e) {
-      setStatusError(true);
-      setStatus("Gate persist failed: " + e.message);
-    }
-    await evaluate(activeId, contextJSON);
-  }
+  }, [boot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function selectCase(preset) {
     setActiveId(preset.id);
     const raw = JSON.stringify(preset.context, null, 2);
     setContextJSON(raw);
-    writeCaseURL(preset.id);
+    setHighlight("");
     evaluate(preset.id, raw);
   }
 
@@ -275,13 +240,13 @@ export default function Studio({ boot }) {
       return;
     }
     setStatusError(false);
-    setStatus(data.has_api_key ? "Live key stored in memory. Re-evaluating…" : "Key cleared. Simulator mode.");
+    setStatus(data.has_api_key ? "Engine key held in memory." : "Key cleared. Simulator.");
     evaluate(activeId, contextJSON);
   }
 
   function applyRecommended() {
     if (!flywheel) return;
-    persistThresholds({
+    setThresholds({
       security_gate_confidence: flywheel.recommended_block_prob,
       field_verify_confidence: flywheel.recommended_verify_min,
       router_confidence: flywheel.recommended_act_gate,
@@ -304,8 +269,7 @@ export default function Studio({ boot }) {
       }
       setCompiled(data);
       setUseSchema(true);
-      setStatusError(false);
-      setStatus(`Bound ${data.fields?.length || 0} field nouls · ${data.question_count} questions in one SystemOne pass.`);
+      setStatus(`Bound ${data.fields?.length || 0} field nouls.`);
     } catch (e) {
       setStatusError(true);
       setStatus("Schema compile failed: " + e.message);
@@ -325,29 +289,71 @@ export default function Studio({ boot }) {
         setStatus(data.error || "Need labeled runs before solving τ");
         return;
       }
-      persistThresholds(data.thresholds);
-      setStatusError(false);
-      setStatus(
-        `Solved τ for ${(data.max_escape_rate * 100).toFixed(2)}% escape SLA · match ${(data.match_rate * 100).toFixed(0)}% on ${data.samples} labeled turns.`
-      );
+      setThresholds(data.thresholds);
+      setStatus(`Solved τ · match ${(data.match_rate * 100).toFixed(0)}% on ${data.samples} labels.`);
     } catch (e) {
       setStatusError(true);
       setStatus("Calibrate failed: " + e.message);
     }
   }
 
+  async function runPortfolio() {
+    const out = {};
+    for (const p of presets) {
+      const data = await evaluate(p.id, JSON.stringify(p.context, null, 2), { read_only: true, silent: true });
+      if (data) out[p.id] = data;
+    }
+    setPortfolio(out);
+    setStatus("Portfolio scored. Drag τ to re-gate all four cases at 0 ms.");
+  }
+
+  async function runBacktest(jsonl, synthetic) {
+    try {
+      const r = await fetch(`${BACKEND}/backtest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonl: jsonl || "",
+          synthetic: synthetic || 0,
+          thresholds,
+          monthly_volume: 10000000,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setStatusError(true);
+        setStatus(data.error || "Backtest failed");
+        return;
+      }
+      setBacktest(data);
+      setStatus(`Backtest ${data.turns} turns · ${data.savings_percent.toFixed(1)}% vs unrouted frontier.`);
+    } catch (e) {
+      setStatusError(true);
+      setStatus("Backtest failed: " + e.message);
+    }
+  }
+
+  async function printSlip() {
+    const text = `${evalRes?.request_id || ""}\n${contextJSON}`;
+    const hex = evalRes?.audit_hash || (await sha256Hex(text));
+    setPrintHash(hex);
+    setTimeout(() => window.print(), 50);
+  }
+
   const cascade = evalRes?.cascade;
   const fields = evalRes?.field_verifications || [];
   const questions = evalRes?.questions || [];
   const history = evalRes?.history || [];
-  const surgical = evalRes?.surgical;
-  const calibration = evalRes?.calibration;
+  const surgical = evalRes?.failed_fields?.length ? rawEval?.surgical : null;
+  const snippets = exportSnippets({ thresholds, questions, pipeline: evalRes?.pipeline });
+  const race = raceModel(evalRes?.final_route_tier);
+  const marked = highlight ? highlightPayload(contextJSON, highlight) : [{ text: contextJSON, mark: false }];
 
   return (
     <div className={pending ? "pending" : ""} aria-busy={pending}>
       <p className="folio">
         <span>{hosted ? "Vercel edition" : "Loopback edition"}</span>
-        <span>TypeSafe Jev-1.13 · Next.js + Gin</span>
+        <span>Aegis Speculative Control Plane · v1.0</span>
         <span>{hosted ? "Fluid Compute" : initial?.listen || "loopback"}</span>
       </p>
 
@@ -357,26 +363,13 @@ export default function Studio({ boot }) {
           <p className="standfirst">Bind any schema. Repair one field. Calibrate τ.</p>
         </div>
         <div className="masthead-right">
-          <p className={live ? "mode live" : "mode sim"} aria-live="polite">
-            {modeLabel}
-          </p>
+          <p className={live ? "mode live" : "mode sim"} aria-live="polite">{modeLabel}</p>
           {hosted ? (
-            <p className="note">
-              Live Jev uses the server <code>TYPESAFE_API_KEY</code> env var.
-            </p>
+            <p className="note">Live scorer uses <code>AEGIS_ENGINE_KEY</code> (or legacy <code>TYPESAFE_API_KEY</code>).</p>
           ) : (
             <form className="key-form" onSubmit={holdKey} autoComplete="off">
-              <label className="sr-only" htmlFor="api-key-input">
-                TypeSafe API key
-              </label>
-              <input
-                id="api-key-input"
-                type="password"
-                value={keyValue}
-                onChange={(e) => setKeyValue(e.target.value)}
-                placeholder="API key"
-                spellCheck={false}
-              />
+              <label className="sr-only" htmlFor="api-key-input">Engine key</label>
+              <input id="api-key-input" type="password" value={keyValue} onChange={(e) => setKeyValue(e.target.value)} placeholder="AEGIS_ENGINE_KEY" spellCheck={false} />
               <button type="submit">Hold in memory</button>
             </form>
           )}
@@ -387,12 +380,12 @@ export default function Studio({ boot }) {
         <div>
           <span>Latency</span>
           <strong>{evalRes ? `${evalRes.latency_ms.toFixed(0)} ms` : <span className="sk-lg" />}</strong>
-          <em>Jev P50 {cascade ? `${cascade.reference_jev_p50_ms.toFixed(0)} ms` : "114 ms"}</em>
+          <em>Control plane P50 {cascade ? `${cascade.reference_jev_p50_ms.toFixed(0)} ms` : "114 ms"}</em>
         </div>
         <div>
           <span>Fan-out</span>
           <strong>{cascade ? money(cascade.aegis_control_cost_usd) : <span className="sk-lg" />}</strong>
-          <em>{evalRes ? `${evalRes.question_count || questions.length} heads` : "$0.042 / 1M in"}</em>
+          <em>{evalRes ? `${evalRes.question_count || questions.length} heads` : "—"}</em>
         </div>
         <div>
           <span>Saved vs frontier</span>
@@ -407,9 +400,7 @@ export default function Studio({ boot }) {
         <div>
           <span>Runs</span>
           <strong>{flywheel ? String(flywheel.distilled_golden_examples) : "0"}</strong>
-          <em>
-            {flywheel ? `${flywheel.guardrails_blocked} block · ${flywheel.auto_executed} auto` : "—"}
-          </em>
+          <em>{flywheel ? `${flywheel.guardrails_blocked} block · ${flywheel.auto_executed} auto` : "—"}</em>
         </div>
       </section>
 
@@ -418,21 +409,9 @@ export default function Studio({ boot }) {
           <h2>Cases</h2>
           <div className="cases" role="radiogroup" aria-label="Preset cases">
             {presets.map((p, i) => (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={p.id === activeId}
-                tabIndex={p.id === activeId ? 0 : -1}
-                className={p.id === activeId ? "scenario-btn active" : "scenario-btn"}
-                onClick={() => selectCase(p)}
-                onKeyDown={(ev) => onCaseKey(ev, i)}
-              >
+              <button key={p.id} type="button" role="radio" aria-checked={p.id === activeId} tabIndex={p.id === activeId ? 0 : -1} className={p.id === activeId ? "scenario-btn active" : "scenario-btn"} onClick={() => selectCase(p)} onKeyDown={(ev) => onCaseKey(ev, i)}>
                 <div className="scenario-top">
-                  <span className="scenario-title">
-                    <span className="scenario-index">{String(i + 1).padStart(2, "0")}</span>
-                    {p.title}
-                  </span>
+                  <span className="scenario-title"><span className="scenario-index">{String(i + 1).padStart(2, "0")}</span>{p.title}</span>
                   <span className="scenario-tag">{p.badge}</span>
                 </div>
                 <p className="scenario-desc">{p.description}</p>
@@ -441,9 +420,10 @@ export default function Studio({ boot }) {
           </div>
 
           <h2>Gates</h2>
-          <button type="button" className="linkish" onClick={applyRecommended}>
-            Use recommended τ
-          </button>
+          <div className="moat-actions">
+            <button type="button" className="linkish" onClick={applyRecommended}>Use recommended τ</button>
+            <button type="button" className="linkish" onClick={printSlip}>Print ruling slip</button>
+          </div>
           <div className="sliders">
             {[
               ["security_gate_confidence", "Security", 0.5, 0.99, 0.01, 2],
@@ -453,106 +433,49 @@ export default function Studio({ boot }) {
             ].map(([key, label, min, max, step, digits]) => (
               <label key={key}>
                 {label} <b>{Number(thresholds[key]).toFixed(digits)}</b>
-                <input
-                  type="range"
-                  min={min}
-                  max={max}
-                  step={step}
-                  value={thresholds[key]}
-                  onChange={(e) => {
-                    const next = { ...thresholds, [key]: parseFloat(e.target.value) };
-                    setThresholds(next);
-                    clearTimeout(thresholdTimer.current);
-                    thresholdTimer.current = setTimeout(() => persistThresholds(next), 220);
-                  }}
-                />
+                <input type="range" min={min} max={max} step={step} value={thresholds[key]} onInput={(e) => setThresholds({ ...thresholds, [key]: parseFloat(e.target.value) })} onChange={(e) => setThresholds({ ...thresholds, [key]: parseFloat(e.target.value) })} />
               </label>
             ))}
             <label>
               Max escape <b>{(escapeRate * 100).toFixed(2)}%</b>
-              <input
-                type="range"
-                min={0.001}
-                max={0.05}
-                step={0.001}
-                value={escapeRate}
-                onChange={(e) => setEscapeRate(parseFloat(e.target.value))}
-              />
+              <input type="range" min={0.001} max={0.05} step={0.001} value={escapeRate} onChange={(e) => setEscapeRate(parseFloat(e.target.value))} />
             </label>
           </div>
           <div className="moat-actions">
-            <button type="button" onClick={solveTau}>
-              Solve τ
-            </button>
+            <button type="button" onClick={solveTau}>Solve τ</button>
+            <button type="button" onClick={runPortfolio}>Run all 4</button>
           </div>
-          <p className="note">
-            {flywheel
-              ? `τ  sec=${flywheel.recommended_block_prob.toFixed(2)}  field=${flywheel.recommended_verify_min.toFixed(2)}  route=${flywheel.recommended_act_gate.toFixed(2)}  composite=${flywheel.recommended_composite.toFixed(0)}  ECE=${flywheel.expected_calibration_ece.toFixed(3)}`
-              : ""}
-            {calibration?.samples
-              ? ` · solver ${calibration.samples} labels, escape ${(calibration.escape_rate * 100).toFixed(2)}%`
-              : ""}
-          </p>
 
           <h2>Schema</h2>
-          <p className="note">
-            Paste JSON Schema or a TypeScript interface. Each leaf becomes a field noul on the same prefill.
-          </p>
-          <label className="sr-only" htmlFor="schema-editor">
-            JSON Schema or TypeScript interface
-          </label>
-          <textarea
-            id="schema-editor"
-            className="schema-box"
-            spellCheck={false}
-            value={schemaText}
-            onChange={(e) => setSchemaText(e.target.value)}
-          />
+          <p className="note">New keys in <code>extracted_fields</code> / <code>mini_model_extraction</code> become field nouls automatically. Bind a full schema to replace the default four.</p>
+          <textarea id="schema-editor" className="schema-box" spellCheck={false} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} />
           <div className="moat-actions">
-            <button type="button" onClick={compileSchema}>
-              Bind schema
-            </button>
-            <button
-              type="button"
-              className="linkish"
-              onClick={() => {
-                setUseSchema(false);
-                setCompiled(null);
-              }}
-            >
-              Use default 4 fields
-            </button>
+            <button type="button" onClick={compileSchema}>Bind schema</button>
+            <button type="button" className="linkish" onClick={() => { setUseSchema(false); setCompiled(null); }}>Default + extras</button>
           </div>
-          <p className="note">
-            {useSchema && compiled
-              ? `${compiled.fields?.length || 0} compiled fields · ${compiled.question_count} questions`
-              : "Default four field nouls (vendor, amount, date, claim)."}
-          </p>
 
           <div className="run-row">
             <h2>Payload</h2>
-            <button type="button" onClick={() => evaluate(activeId, contextJSON)}>
-              Evaluate
-            </button>
+            <button type="button" onClick={() => evaluate(activeId, contextJSON)}>Evaluate</button>
           </div>
-          <label className="sr-only" htmlFor="context-editor">
-            JSON context payload
-          </label>
-          <textarea
-            id="context-editor"
-            spellCheck={false}
-            value={contextJSON}
-            onChange={(e) => setContextJSON(e.target.value)}
-            onKeyDown={(ev) => {
-              if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") {
-                ev.preventDefault();
-                evaluate(activeId, contextJSON);
-              }
-            }}
-          />
-          <p className={statusError ? "status error" : "status"} role="status">
-            {status}
-          </p>
+          {highlight ? (
+            <pre className="payload-mark" aria-label="Highlighted payload">{marked.map((p, i) => p.mark ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>)}</pre>
+          ) : null}
+          <textarea id="context-editor" spellCheck={false} value={contextJSON} onChange={(e) => setContextJSON(e.target.value)} onKeyDown={(ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); evaluate(activeId, contextJSON); } }} />
+          <p className={statusError ? "status error" : "status"} role="status">{status}</p>
+
+          <h2>FinOps batch</h2>
+          <div className="moat-actions">
+            <button type="button" onClick={() => runBacktest("", 50)}>50-turn synthetic</button>
+            <label className="linkish">
+              Upload .jsonl
+              <input type="file" accept=".jsonl,application/jsonl,text/plain" className="sr-only" onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                runBacktest(await file.text(), 0);
+              }} />
+            </label>
+          </div>
         </aside>
 
         <section className="copy">
@@ -562,113 +485,108 @@ export default function Studio({ boot }) {
             <p className={tierClass(evalRes?.final_route_tier)}>{evalRes?.final_route_tier || "—"}</p>
           </div>
           <p className="lede">{evalRes?.final_decision || ""}</p>
-          <p className="note">
-            {evalRes?.failed_fields?.length
-              ? "Fields in repair: " + evalRes.failed_fields.join(", ")
-              : evalRes?.selected_skill
-                ? "Skill: " + evalRes.selected_skill
-                : ""}
-          </p>
+          {evalRes?.replayed ? <p className="note">Counterfactual re-gate at 0 ms — probabilities unchanged.</p> : null}
+
+          <div className="race" aria-label="Modeled speculative race">
+            <div className="race-track">
+              <span className="race-jev" style={{ width: "12%" }} />
+              {race.abortAt ? <span className="race-abort" /> : <span className="race-llm" />}
+            </div>
+            <p className="note">{race.caption}</p>
+            <p className="note">0 ms ──► 114 ms [control plane] {race.abortAt ? "──X── 2,400 ms [stream cancelled]" : "────── 2,400 ms [draft continues]"}</p>
+          </div>
+
+          {surgical?.executed ? (
+            <div className="patch slip">
+              <h2>Surgical repair slip</h2>
+              <p className="note">Micro-prompt {surgical.token_budget} tokens vs {surgical.full_retry_tokens || 1420} for a full-document retry.</p>
+              <p className="lede">{surgical.micro_prompt}</p>
+              <Table caption="Frozen fields — locked, not regenerated" headers={["Field", "P(yes)"]} rows={(surgical.frozen_fields || []).map((f) => [f.field, `${((f.yes_prob || 0) * 100).toFixed(0)}%`])} rowClasses={(surgical.frozen_fields || []).map(() => "ok")} />
+              <div className="diff">
+                {(surgical.patches || []).map((p) => (
+                  <p key={p.field}>
+                    <span className="del">- {JSON.stringify(p.field)}: {JSON.stringify(p.before)}</span>
+                    <br />
+                    <span className="add">+ {JSON.stringify(p.field)}: {JSON.stringify(p.after)}</span>
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {portfolio ? (
+            <div className="patch">
+              <h2>Portfolio</h2>
+              <Table
+                caption="Four presets re-gated with the current τ"
+                headers={["Case", "Tier"]}
+                rows={presets.map((p) => {
+                  const replayed = replayRuling(portfolio[p.id], thresholds);
+                  return [p.title, replayed?.final_route_tier || "—"];
+                })}
+              />
+            </div>
+          ) : null}
+
+          {backtest ? (
+            <div className="patch">
+              <h2>Executive FinOps ledger</h2>
+              <Table
+                caption={`Projected at ${(backtest.monthly_volume / 1e6).toFixed(0)}M req/mo`}
+                headers={["Tier", "Share", "Turns"]}
+                rows={Object.entries(backtest.tier_rates || {}).map(([k, v]) => [k, `${(v * 100).toFixed(1)}%`, String(backtest.tier_counts[k] || 0)])}
+              />
+              <p className="lede">
+                ${backtest.monthly_baseline_usd.toFixed(0)}/mo unrouted → ${backtest.monthly_aegis_usd.toFixed(0)}/mo Aegis ({backtest.savings_percent.toFixed(1)}% net).
+              </p>
+              <p className="note">Confusion {JSON.stringify(backtest.confusion)} · match {(backtest.match_rate * 100).toFixed(0)}% on {backtest.labeled} labeled turns.</p>
+            </div>
+          ) : null}
 
           <table className="compare">
-            <caption>
-              {surgical?.executed
-                ? "Tier-2 splice is executed on failed fields only — locked JSON is copied"
-                : "Control-plane spend is real; downstream Mini/Frontier spend is modeled unless a field is spliced"}
-            </caption>
-            <thead>
-              <tr>
-                <th></th>
-                <th>Cost</th>
-                <th>Time</th>
-              </tr>
-            </thead>
+            <caption>Control-plane spend is metered. Downstream Mini/Frontier is modeled unless a field is spliced.</caption>
+            <thead><tr><th></th><th>Cost</th><th>Time</th></tr></thead>
             <tbody>
-              <tr>
-                <td>Frontier + judge</td>
-                <td>{cascade ? money(cascade.naive_frontier_cost_usd) : "—"}</td>
-                <td>{cascade ? `${cascade.naive_frontier_latency_ms.toFixed(0)} ms` : "—"}</td>
-              </tr>
-              <tr>
-                <td>Legacy router</td>
-                <td>{cascade ? money(cascade.legacy_router_cost_usd) : "—"}</td>
-                <td>{cascade ? `${cascade.legacy_router_latency_ms.toFixed(0)} ms` : "—"}</td>
-              </tr>
-              <tr>
-                <td>This run</td>
-                <td>{cascade ? money(cascade.aegis_blended_cost_usd) : "—"}</td>
-                <td>{cascade ? `${cascade.aegis_total_latency_ms.toFixed(0)} ms` : "—"}</td>
-              </tr>
+              <tr><td>Frontier + judge</td><td>{cascade ? money(cascade.naive_frontier_cost_usd) : "—"}</td><td>{cascade ? `${cascade.naive_frontier_latency_ms.toFixed(0)} ms` : "—"}</td></tr>
+              <tr><td>This run</td><td>{cascade ? money(cascade.aegis_blended_cost_usd) : "—"}</td><td>{cascade ? `${cascade.aegis_total_latency_ms.toFixed(0)} ms` : "—"}</td></tr>
             </tbody>
           </table>
 
           <h2>Fields</h2>
           <Table
-            caption="Per-field noul gates. Failed fields go to surgical repair; locked fields are not regenerated."
+            caption="Click a row to ink the trigger in the payload"
             headers={["Field", "P(yes)", "Conf", "Gate"]}
-            rows={fields.map((f) => [
-              f.field_name,
-              `${(f.yes_prob * 100).toFixed(0)}%`,
-              f.confidence.toFixed(2),
-              f.verified ? "lock" : "repair",
-            ])}
+            rows={fields.map((f) => [f.field_name, `${(f.yes_prob * 100).toFixed(0)}%`, f.confidence.toFixed(2), f.verified ? "lock" : "repair"])}
             rowClasses={fields.map((f) => (f.verified ? "ok" : "fail"))}
+            onRowClick={(i) => setHighlight(needleForRow(fields[i].field_name, rawEval?.evidence, contextJSON) || fields[i].field_name)}
           />
-
-          {surgical?.executed ? (
-            <div className="patch">
-              <h2>Surgical splice</h2>
-              <p className="note">
-                {surgical.token_budget}-token prompt · {surgical.patches?.length || 0} field
-                {surgical.patches?.length === 1 ? "" : "s"} repaired. Locked JSON copied unchanged.
-              </p>
-              <Table
-                caption="Before / after for failed fields only"
-                headers={["Field", "Before", "After", "Method"]}
-                rows={(surgical.patches || []).map((p) => [
-                  p.field,
-                  String(p.before ?? "—"),
-                  String(p.after ?? "—"),
-                  p.method,
-                ])}
-              />
-              <p className="kicker">Repair prompt</p>
-              <pre>{surgical.prompt}</pre>
-              <p className="kicker">Spliced JSON</p>
-              <pre>{JSON.stringify(surgical.repaired_json, null, 2)}</pre>
-            </div>
-          ) : null}
-
-          {compiled?.stub && useSchema ? (
-            <div className="patch">
-              <h2>BindQuestions stub</h2>
-              <pre>{compiled.stub}</pre>
-            </div>
-          ) : null}
 
           <h2>Questions</h2>
           <Table
-            caption="Atomic questions bound over one SystemOne prefill"
+            caption="Click a row to underline the evidence span"
             headers={["Question", "Stage", "Answer", "P", "Gate"]}
             rows={questions.map((q) => [
-              <div key={q.id}>
-                <div>{q.id}</div>
-                <div className="q-prompt">{q.prompt}</div>
-              </div>,
+              <div key={q.id}><div>{q.id}</div><div className="q-prompt">{q.prompt}</div></div>,
               q.stage,
               q.selected_choice,
               `${(q.top_probability * 100).toFixed(0)}%`,
               String(q.route_reason || "").replace("Gate: ", ""),
             ])}
+            onRowClick={(i) => setHighlight(needleForRow(questions[i].id, rawEval?.evidence, contextJSON) || questions[i].id)}
           />
+
+          <h2>Code / SDK</h2>
+          <div className="moat-actions">
+            {["go", "ts", "curl"].map((lang) => (
+              <button key={lang} type="button" className={sdkLang === lang ? "" : "linkish"} onClick={() => setSdkLang(lang)}>{lang}</button>
+            ))}
+            <button type="button" className="linkish" onClick={() => navigator.clipboard.writeText(snippets[sdkLang])}>Copy</button>
+          </div>
+          <pre className="sdk">{snippets[sdkLang]}</pre>
 
           <h2>Log</h2>
           {history.length ? (
-            <Table
-              caption="Recent labeled turns feeding the τ solver"
-              headers={["Time", "Route", "ms"]}
-              rows={history.map((h) => [h.timestamp, h.final_route_tier, `${h.latency_ms.toFixed(0)} ms`])}
-            />
+            <Table caption="Recent labeled turns" headers={["Time", "Route", "ms"]} rows={history.map((h) => [h.timestamp, h.final_route_tier, `${h.latency_ms.toFixed(0)} ms`])} />
           ) : (
             <p className="note">No mutating runs yet. Page load is read-only.</p>
           )}
@@ -677,8 +595,10 @@ export default function Studio({ boot }) {
 
       <footer className="colophon">
         {hosted
-          ? "Hosted workbench. Evaluations carry τ inline. The flywheel is per-instance. Live Jev is rate-limited. Routes come from the payload, not the case name."
-          : "Local workbench. Key hold is loopback-only. Routes come from the payload, not the case name."}
+          ? "Hosted workbench. τ is inline. Flywheel is per-instance. Live evaluate is rate-limited."
+          : "Local workbench. Engine key hold is loopback-only."}
+        {printHash || evalRes?.audit_hash ? ` SHA-256 ${printHash || evalRes.audit_hash}` : ""}
+        {compiled?.stub && useSchema ? "" : ""}
       </footer>
     </div>
   );

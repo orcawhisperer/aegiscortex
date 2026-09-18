@@ -2,6 +2,9 @@ package aegiscortex
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 )
 
@@ -124,6 +127,15 @@ type EvaluationResponse struct {
 	QuestionCount      int                     `json:"question_count"`
 	ReadOnly           bool                    `json:"read_only,omitempty"`
 	CompiledFields     []CompiledField         `json:"compiled_fields,omitempty"`
+	AuditHash          string                  `json:"audit_hash,omitempty"`
+	Evidence           []EvidenceSpan          `json:"evidence,omitempty"`
+	Scorer             string                  `json:"scorer,omitempty"`
+}
+
+// EvidenceSpan is a payload substring to ink in the auditor’s marginalia.
+type EvidenceSpan struct {
+	Key    string `json:"key"`
+	Needle string `json:"needle"`
 }
 
 // NewCortexEngineWithKey constructs a CortexEngine and optionally sets a key.
@@ -252,6 +264,11 @@ func (e *CortexEngine) EvaluateRequest(ctx context.Context, req EvaluationReques
 		gates = &g
 	}
 
+	extras := InferExtraFields(statePayload)
+	if schema != nil {
+		extras = nil
+	}
+
 	outcome, err := e.evaluate(ctx, evaluateOpts{
 		Pipeline:     pipeline,
 		State:        statePayload,
@@ -261,6 +278,7 @@ func (e *CortexEngine) EvaluateRequest(ctx context.Context, req EvaluationReques
 		ReadOnly:     req.ReadOnly,
 		ScenarioID:   req.ScenarioID,
 		ExpectedTier: req.ExpectedTier,
+		ExtraFields:  extras,
 	})
 	if err != nil {
 		return EvaluationResponse{}, err
@@ -326,7 +344,57 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 		QuestionCount:      len(qViews),
 		ReadOnly:           req.ReadOnly,
 		CompiledFields:     compiled,
+		AuditHash:          auditHash(state, outcome.RequestID),
+		Evidence:           evidenceSpans(state, fields, qViews),
+		Scorer:             scorerName(outcome.Mode),
 	}
+}
+
+func scorerName(mode string) string {
+	if mode == "live_api" {
+		return "typesafe_jev"
+	}
+	return "aegis_calibrated_simulator"
+}
+
+func auditHash(state any, requestID string) string {
+	raw, _ := json.Marshal(state)
+	sum := sha256.Sum256(append(append([]byte(requestID), '\n'), raw...))
+	return hex.EncodeToString(sum[:])
+}
+
+func evidenceSpans(state any, fields []FieldVerificationView, questions []QuestionView) []EvidenceSpan {
+	root := asObject(state)
+	raw, _ := json.Marshal(state)
+	blob := string(raw)
+	var out []EvidenceSpan
+	add := func(key, needle string) {
+		if needle == "" || !strings.Contains(blob, needle) {
+			return
+		}
+		out = append(out, EvidenceSpan{Key: key, Needle: needle})
+	}
+	if passages := collectPassageText(root["retrieved_passages"]); containsAny(passages, "system override") {
+		add("indirect_prompt_injection", "SYSTEM OVERRIDE")
+	}
+	ext := extractionObject(state)
+	for _, f := range fields {
+		if f.Verified {
+			continue
+		}
+		if v := stringify(firstValue(ext, f.FieldName)); v != "" {
+			add(f.FieldName, v)
+		}
+	}
+	if notice := stringify(firstValue(ext, "notice_deadline_date")); notice != "" {
+		add("notice_deadline_date", notice)
+	}
+	for _, q := range questions {
+		if q.ID == qRAGInjection && q.TopProbability >= 0.5 {
+			add(q.ID, "SYSTEM OVERRIDE")
+		}
+	}
+	return out
 }
 
 func routeTierFromVerdict(verdict string) string {

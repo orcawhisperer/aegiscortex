@@ -46,4 +46,18 @@ func TestRegisterRoutesDoesNotPanicAndServesStatus(t *testing.T) {
 	if put.Code != http.StatusMethodNotAllowed && put.Code != http.StatusNotFound {
 		t.Fatalf("PUT status = %d", put.Code)
 	}
+
+	boot := httptest.NewRecorder()
+	router.ServeHTTP(boot, httptest.NewRequest(http.MethodGet, "/svc/api/boot?case=sde_hallucinated_date", nil))
+	if boot.Code != http.StatusOK || !strings.Contains(boot.Body.String(), "sde_hallucinated_date") {
+		t.Fatalf("boot permalink case = %d %s", boot.Code, boot.Body.String())
+	}
+
+	bt := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/svc/api/backtest", strings.NewReader(`{"synthetic":4,"monthly_volume":10000000}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(bt, req)
+	if bt.Code != http.StatusOK || !strings.Contains(bt.Body.String(), `"turns":4`) {
+		t.Fatalf("backtest = %d %s", bt.Code, bt.Body.String())
+	}
 }

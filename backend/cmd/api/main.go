@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/gin-gonic/gin"
 	aegis "github.com/orcawhisperer/aegiscortex"
@@ -17,7 +16,7 @@ func main() {
 		log.Fatalf("security policy violation: %v", err)
 	}
 
-	engine := aegis.NewCortexEngineWithKey(os.Getenv("TYPESAFE_API_KEY"))
+	engine := aegis.NewCortexEngineWithKey(aegis.EngineKeyFromEnv())
 	api, err := aegis.NewServerHandler(engine)
 	if err != nil {
 		log.Fatalf("failed to initialize AegisCortex API: %v", err)
@@ -27,7 +26,7 @@ func main() {
 	router.Use(gin.Recovery())
 	registerRoutes(router, api)
 
-	log.Printf("AegisCortex Gin backend on http://%s (sim unless TYPESAFE_API_KEY is set)", addr)
+	log.Printf("AegisCortex control plane on http://%s (sim unless AEGIS_ENGINE_KEY is set)", addr)
 	if err := router.Run(addr); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -53,6 +52,7 @@ func registerRoutes(router *gin.Engine, api http.Handler) {
 	router.POST("/svc/api/key", proxy(api, "/api/key"))
 	router.POST("/svc/api/compile", proxy(api, "/api/compile"))
 	router.POST("/svc/api/calibrate", proxy(api, "/api/calibrate"))
+	router.POST("/svc/api/backtest", proxy(api, "/api/backtest"))
 }
 
 func proxy(api http.Handler, path string) gin.HandlerFunc {

@@ -126,20 +126,23 @@ type CortexEngine struct {
 	labels     []LabeledTurn
 	lastSolve  SolvedGates
 	limiter    *ipLimiter
+	simScorer  SpeculativeScorer
+	liveScorer SpeculativeScorer
 }
 
-// NewCortexEngine initializes the engine from TYPESAFE_API_KEY / TYPESAFE_BASE_URL.
+// NewCortexEngine initializes the engine from AEGIS_ENGINE_KEY / TYPESAFE_API_KEY.
 func NewCortexEngine() *CortexEngine {
-	envKey := strings.TrimSpace(os.Getenv(typesafe.APIKeyEnv))
+	envKey := EngineKeyFromEnv()
 	envURL := strings.TrimSpace(os.Getenv(typesafe.BaseURLEnv))
 	if envURL == "" {
 		envURL = typesafe.DefaultBaseURL
 	}
-	return &CortexEngine{
+	e := &CortexEngine{
 		apiKey:     envKey,
 		baseURL:    envURL,
 		thresholds: DefaultGateThresholds(),
 		limiter:    newIPLimiter(),
+		simScorer:  simulatorScorer{},
 		metrics: FlywheelMetrics{
 			ExpectedCalibrationECE: 0.018,
 			RecommendedActGate:     0.80,
@@ -148,6 +151,8 @@ func NewCortexEngine() *CortexEngine {
 			RecommendedComposite:   68.0,
 		},
 	}
+	e.liveScorer = typesafeScorer{engine: e}
+	return e
 }
 
 // SetAPIKey updates the in-memory TypeSafe API key (never written to disk).
@@ -267,6 +272,7 @@ type evaluateOpts struct {
 	ReadOnly     bool
 	ScenarioID   string
 	ExpectedTier string
+	ExtraFields  []CompiledField
 }
 
 // Evaluate runs the 11-question fan-out. Live API is used when a key is present;
@@ -283,7 +289,7 @@ func (e *CortexEngine) evaluate(ctx context.Context, opts evaluateOpts) (*Evalua
 		thresh = *opts.Thresholds
 	}
 
-	questions, specs := BuildQuestions(opts.Pipeline, opts.Schema)
+	questions, specs := BuildQuestions(opts.Pipeline, opts.Schema, opts.ExtraFields)
 	start := time.Now()
 
 	var sdkResp *typesafe.SystemOneResponse
@@ -291,28 +297,19 @@ func (e *CortexEngine) evaluate(ctx context.Context, opts evaluateOpts) (*Evalua
 	fallback := false
 	liveErr := ""
 
-	if opts.PreferLive {
-		if client, err := e.acquireLiveClient(); err != nil {
+	if opts.PreferLive && e.liveScorer != nil {
+		liveResp, callErr := e.liveScorer.Score(ctx, opts.Pipeline, opts.State, questions, specs)
+		if callErr != nil {
 			fallback = true
-			liveErr = sanitizeLiveError(err)
-		} else if client != nil {
-			liveResp, callErr := client.SystemOne(ctx, typesafe.SystemOneRequest{
-				State:     opts.State,
-				Questions: questions,
-				Model:     typesafe.ModelJev1_13_0,
-			})
-			if callErr != nil {
-				fallback = true
-				liveErr = sanitizeLiveError(callErr)
-			} else {
-				sdkResp = liveResp
-				mode = "live_api"
-			}
+			liveErr = sanitizeLiveError(callErr)
+		} else if liveResp != nil {
+			sdkResp = liveResp
+			mode = "live_api"
 		}
 	}
 
 	if sdkResp == nil {
-		sdkResp = simulateCalibratedJevResponse(opts.Pipeline, opts.State, specs)
+		sdkResp, _ = e.simScorer.Score(ctx, opts.Pipeline, opts.State, questions, specs)
 	}
 
 	elapsedMs := time.Since(start).Milliseconds()

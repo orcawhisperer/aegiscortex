@@ -5,7 +5,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node lib/backend-origin.test.cjs"
+    "test": "node lib/backend-origin.test.cjs && node lib/decide-route.test.cjs && node lib/studio-lib.test.mjs"
   },
   "dependencies": {
     "next": "^15.5.4",
