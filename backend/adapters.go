@@ -2,6 +2,9 @@ package aegiscortex
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 )
 
@@ -25,8 +28,14 @@ type PipelineThresholds struct {
 
 // EvaluationRequest is POST /api/evaluate.
 type EvaluationRequest struct {
-	ScenarioID string         `json:"scenario_id"`
-	Context    map[string]any `json:"context"`
+	ScenarioID    string              `json:"scenario_id"`
+	Context       map[string]any      `json:"context"`
+	Schema        map[string]any      `json:"schema,omitempty"`
+	SchemaText    string              `json:"schema_text,omitempty"`
+	Thresholds    *PipelineThresholds `json:"thresholds,omitempty"`
+	ReadOnly      bool                `json:"read_only,omitempty"`
+	ExpectedTier  string              `json:"expected_tier,omitempty"`
+	MaxEscapeRate float64             `json:"max_escape_rate,omitempty"`
 }
 
 // FieldVerificationView is one card in the per-field gate.
@@ -113,6 +122,20 @@ type EvaluationResponse struct {
 	Questions          []QuestionView          `json:"questions"`
 	Flywheel           FlywheelTelemetryView   `json:"flywheel"`
 	History            []HistoryEntry          `json:"history"`
+	Surgical           *SurgicalPatch          `json:"surgical,omitempty"`
+	Calibration        *SolvedGates            `json:"calibration,omitempty"`
+	QuestionCount      int                     `json:"question_count"`
+	ReadOnly           bool                    `json:"read_only,omitempty"`
+	CompiledFields     []CompiledField         `json:"compiled_fields,omitempty"`
+	AuditHash          string                  `json:"audit_hash,omitempty"`
+	Evidence           []EvidenceSpan          `json:"evidence,omitempty"`
+	Scorer             string                  `json:"scorer,omitempty"`
+}
+
+// EvidenceSpan is a payload substring to ink in the auditor’s marginalia.
+type EvidenceSpan struct {
+	Key    string `json:"key"`
+	Needle string `json:"needle"`
 }
 
 // NewCortexEngineWithKey constructs a CortexEngine and optionally sets a key.
@@ -216,15 +239,55 @@ func (e *CortexEngine) EvaluateRequest(ctx context.Context, req EvaluationReques
 		}
 	}
 
-	outcome, err := e.Evaluate(ctx, pipeline, statePayload, e.HasLiveKey())
+	schema := req.Schema
+	if schema == nil && strings.TrimSpace(req.SchemaText) != "" {
+		if compiled, err := CompileSchemaText(req.SchemaText); err == nil {
+			schema = map[string]any{"title": compiled.Title, "compiled_fields": compiled.Fields}
+			// Rebuild as a JSON Schema properties object so BuildQuestions can walk it.
+			props := map[string]any{}
+			for _, f := range compiled.Fields {
+				props[f.Name] = map[string]any{"type": f.Type}
+			}
+			schema = map[string]any{"title": compiled.Title, "type": "object", "properties": props}
+		}
+	}
+
+	var gates *GateThresholds
+	if req.Thresholds != nil {
+		g := GateThresholds{
+			GuardrailBlockProb:  req.Thresholds.SecurityGateConfidence,
+			CascadeVerifyMin:    req.Thresholds.FieldVerifyConfidence,
+			ChoiceActConfidence: req.Thresholds.RouterConfidence,
+			ReviewMinConfidence: 0.50,
+			CompositePassScore:  req.Thresholds.CompositePassThreshold,
+		}
+		gates = &g
+	}
+
+	extras := InferExtraFields(statePayload)
+	if schema != nil {
+		extras = nil
+	}
+
+	outcome, err := e.evaluate(ctx, evaluateOpts{
+		Pipeline:     pipeline,
+		State:        statePayload,
+		PreferLive:   e.HasLiveKey() && !req.ReadOnly,
+		Schema:       schema,
+		Thresholds:   gates,
+		ReadOnly:     req.ReadOnly,
+		ScenarioID:   req.ScenarioID,
+		ExpectedTier: req.ExpectedTier,
+		ExtraFields:  extras,
+	})
 	if err != nil {
 		return EvaluationResponse{}, err
 	}
 
-	return e.projectResponse(req.ScenarioID, outcome), nil
+	return e.projectResponse(req.ScenarioID, outcome, req, schema, statePayload), nil
 }
 
-func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOutcome) EvaluationResponse {
+func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOutcome, req EvaluationRequest, schema map[string]any, state map[string]any) EvaluationResponse {
 	routeTier := routeTierFromVerdict(outcome.FinalVerdict)
 	fields := fieldViewsFromOutcome(outcome)
 	qViews := questionViewsFromOutcome(outcome)
@@ -232,6 +295,17 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 	modeStr := "CALIBRATED_JEV_SIMULATION"
 	if outcome.Mode == "live_api" {
 		modeStr = "LIVE_TYPESAFE_API"
+	}
+
+	var compiled []CompiledField
+	if schema != nil {
+		if c, err := CompileJSONSchema(schema); err == nil {
+			compiled = c.Fields
+		}
+	}
+	var calibration *SolvedGates
+	if solved := e.snapshotSolve(); solved.Samples > 0 {
+		calibration = &solved
 	}
 
 	return EvaluationResponse{
@@ -265,7 +339,105 @@ func (e *CortexEngine) projectResponse(scenarioID string, outcome *EvaluationOut
 		Questions:          qViews,
 		Flywheel:           e.GetFlywheel(),
 		History:            e.historyView(8),
+		Surgical:           buildSurgicalPatch(state, outcome.FailedFields, fields),
+		Calibration:        calibration,
+		QuestionCount:      len(qViews),
+		ReadOnly:           req.ReadOnly,
+		CompiledFields:     compiled,
+		AuditHash:          auditHash(state, outcome.RequestID),
+		Evidence:           evidenceSpans(state, fields, qViews),
+		Scorer:             scorerName(outcome.Mode),
 	}
+}
+
+func extractionNeedle(ext map[string]any, fieldName string) string {
+	if v := stringify(firstValue(ext, fieldName)); v != "" {
+		return v
+	}
+	fl := strings.ToLower(fieldName)
+	preferNotice := containsAny(fl, "notice", "deadline")
+	var notice, other string
+	remember := func(kl, s string) {
+		if s == "" {
+			return
+		}
+		if containsAny(kl, "notice", "deadline") {
+			notice = s
+			return
+		}
+		if other == "" {
+			other = s
+		}
+	}
+	for k, v := range ext {
+		kl := strings.ToLower(k)
+		s := stringify(v)
+		if kl == fl || strings.Contains(fl, kl) || strings.Contains(kl, fl) {
+			remember(kl, s)
+			continue
+		}
+		if containsAny(fl, "vendor", "entity") && containsAny(kl, "vendor", "entity", "party") {
+			remember(kl, s)
+		}
+		if containsAny(fl, "amount", "value", "monetary") && containsAny(kl, "amount", "value") {
+			remember(kl, s)
+		}
+		if containsAny(fl, "date", "notice", "deadline") && containsAny(kl, "date", "notice", "deadline") {
+			remember(kl, s)
+		}
+	}
+	if preferNotice && notice != "" {
+		return notice
+	}
+	if notice != "" {
+		return notice
+	}
+	return other
+}
+
+func scorerName(mode string) string {
+	if mode == "live_api" {
+		return "typesafe_jev"
+	}
+	return "aegis_calibrated_simulator"
+}
+
+func auditHash(state any, requestID string) string {
+	raw, _ := json.Marshal(state)
+	sum := sha256.Sum256(append(append([]byte(requestID), '\n'), raw...))
+	return hex.EncodeToString(sum[:])
+}
+
+func evidenceSpans(state any, fields []FieldVerificationView, questions []QuestionView) []EvidenceSpan {
+	root := asObject(state)
+	raw, _ := json.Marshal(state)
+	blob := string(raw)
+	var out []EvidenceSpan
+	add := func(key, needle string) {
+		if needle == "" || !strings.Contains(blob, needle) {
+			return
+		}
+		out = append(out, EvidenceSpan{Key: key, Needle: needle})
+	}
+	if passages := collectPassageText(root["retrieved_passages"]); containsAny(passages, "system override") {
+		add("indirect_prompt_injection", "SYSTEM OVERRIDE")
+	}
+	ext := extractionObject(state)
+	for _, f := range fields {
+		if v := extractionNeedle(ext, f.FieldName); v != "" {
+			add(f.FieldName, v)
+			add(f.QuestionID, v)
+		}
+	}
+	if notice := stringify(firstValue(ext, "notice_deadline_date")); notice != "" {
+		add("notice_deadline_date", notice)
+	}
+	for _, q := range questions {
+		if q.ID == qRAGInjection && q.TopProbability >= 0.5 {
+			add(q.ID, "SYSTEM OVERRIDE")
+		}
+	}
+	return out
 }
 
 func routeTierFromVerdict(verdict string) string {

@@ -39,6 +39,13 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if r.Method == http.MethodPost && !acceptJSONPost(r) {
+			writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{
+				"error": "POST requires Content-Type: application/json from a same-site caller",
+			})
+			return
+		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		next.ServeHTTP(w, r)
 	})
@@ -48,6 +55,23 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 	mux := http.NewServeMux()
 
+	status := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":          true,
+			"service":     "backend",
+			"framework":   "go-gin",
+			"status":      "ok",
+			"has_api_key": engine.HasAPIKey(),
+			"hosted":      HostedOnVercel(),
+			"listen":      ResolvedListen(),
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	mux.HandleFunc("/status", status)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -75,13 +99,121 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			"presets":     engine.GetPresets(),
 			"thresholds":  engine.GetThresholds(),
 			"flywheel":    engine.GetFlywheel(),
+			"calibration": engine.snapshotSolve(),
 			"sdk_version": "0.6.0",
 		})
+	})
+
+	mux.HandleFunc("/api/boot", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		presets := engine.GetPresets()
+		var first ScenarioPreset
+		wantCase := strings.TrimSpace(r.URL.Query().Get("case"))
+		for _, p := range presets {
+			if wantCase != "" && p.ID == wantCase {
+				first = p
+				break
+			}
+			if wantCase == "" && p.ID == "rag_verified_fastpath" {
+				first = p
+			}
+		}
+		if first.ID == "" && len(presets) > 0 {
+			first = presets[0]
+		}
+		var eval EvaluationResponse
+		if first.ID != "" {
+			evalCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer cancel()
+			eval, _ = engine.EvaluateRequest(evalCtx, EvaluationRequest{
+				ScenarioID: first.ID,
+				Context:    first.Context,
+				ReadOnly:   true,
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"state": map[string]any{
+				"has_api_key": engine.HasAPIKey(),
+				"hosted":      HostedOnVercel(),
+				"listen":      ResolvedListen(),
+				"presets":     presets,
+				"thresholds":  engine.GetThresholds(),
+				"flywheel":    engine.GetFlywheel(),
+				"calibration": engine.snapshotSolve(),
+				"sdk_version": "0.6.0",
+			},
+			"eval": eval,
+		})
+	})
+
+	mux.HandleFunc("/api/compile", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Schema     map[string]any `json:"schema"`
+			SchemaText string         `json:"schema_text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid compile payload"})
+			return
+		}
+		var compiled CompiledSchema
+		var err error
+		if strings.TrimSpace(body.SchemaText) != "" {
+			compiled, err = CompileSchemaText(body.SchemaText)
+		} else {
+			compiled, err = CompileJSONSchema(body.Schema)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		_, specs := BuildQuestions(PipelineSDE, map[string]any{
+			"title":      compiled.Title,
+			"type":       "object",
+			"properties": schemaProperties(compiled),
+		}, nil)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"title":          compiled.Title,
+			"fields":         compiled.Fields,
+			"question_count": len(specs),
+			"specs":          specs,
+			"stub":           compiled.Stub,
+		})
+	})
+
+	mux.HandleFunc("/api/calibrate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			MaxEscapeRate float64 `json:"max_escape_rate"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid calibrate payload"})
+			return
+		}
+		solved, ok := engine.solveAndRecommend(body.MaxEscapeRate)
+		if !ok {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "not enough labeled turns to solve τ"})
+			return
+		}
+		writeJSON(w, http.StatusOK, solved)
 	})
 
 	mux.HandleFunc("/api/evaluate", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !engine.AllowEvaluate(requestIP(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "live evaluate rate limit (20/min) — protect AEGIS_ENGINE_KEY quota"})
 			return
 		}
 		var req EvaluationRequest
@@ -118,9 +250,9 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if HostedOnVercel() {
+		if !allowBrowserKeyHold(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "On Vercel, set TYPESAFE_API_KEY in project environment variables. Browser key hold is local-only.",
+				"error": "API key hold is loopback-only. On Vercel or any :PORT bind, set AEGIS_ENGINE_KEY in the process environment.",
 			})
 			return
 		}
@@ -142,7 +274,35 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		})
 	})
 
+	mux.HandleFunc("/api/backtest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req BacktestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backtest payload"})
+			return
+		}
+		btx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		report, err := engine.RunBacktest(btx, req)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "backtest failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	})
+
 	return SecurityHeadersMiddleware(mux), nil
+}
+
+func schemaProperties(compiled CompiledSchema) map[string]any {
+	props := map[string]any{}
+	for _, f := range compiled.Fields {
+		props[f.Name] = map[string]any{"type": f.Type}
+	}
+	return props
 }
 
 // HostedOnVercel reports the Vercel function/platform environment.

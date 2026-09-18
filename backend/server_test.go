@@ -179,6 +179,7 @@ func TestHTTPServerSecurityAndEvaluate(t *testing.T) {
 	preset, _ := presetByID("gw_rag_injection")
 	payload, _ := json.Marshal(EvaluationRequest{Context: preset.State})
 	req := httptest.NewRequest(http.MethodPost, "/api/evaluate", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -193,6 +194,7 @@ func TestHTTPServerSecurityAndEvaluate(t *testing.T) {
 	}
 
 	bad := httptest.NewRequest(http.MethodPost, "/api/evaluate", strings.NewReader("{"))
+	bad.Header.Set("Content-Type", "application/json")
 	badRec := httptest.NewRecorder()
 	handler.ServeHTTP(badRec, bad)
 	if badRec.Code != http.StatusBadRequest {
@@ -211,6 +213,24 @@ func TestHTTPServerSecurityAndEvaluate(t *testing.T) {
 	handler.ServeHTTP(healthRec, health)
 	if healthRec.Code != http.StatusOK {
 		t.Fatalf("healthz = %d", healthRec.Code)
+	}
+
+	boot := httptest.NewRequest(http.MethodGet, "/api/boot?case=sde_hallucinated_date", nil)
+	bootRec := httptest.NewRecorder()
+	handler.ServeHTTP(bootRec, boot)
+	if bootRec.Code != http.StatusOK {
+		t.Fatalf("boot = %d %s", bootRec.Code, bootRec.Body.String())
+	}
+	if !strings.Contains(bootRec.Body.String(), `"scenario_id":"sde_hallucinated_date"`) {
+		t.Fatalf("boot permalink missed case: %s", bootRec.Body.String())
+	}
+
+	btReq := httptest.NewRequest(http.MethodPost, "/api/backtest", strings.NewReader(`{"synthetic":4,"monthly_volume":10000000}`))
+	btReq.Header.Set("Content-Type", "application/json")
+	btRec := httptest.NewRecorder()
+	handler.ServeHTTP(btRec, btReq)
+	if btRec.Code != http.StatusOK || !strings.Contains(btRec.Body.String(), `"turns":4`) {
+		t.Fatalf("backtest = %d %s", btRec.Code, btRec.Body.String())
 	}
 }
 
@@ -284,6 +304,7 @@ func TestVercelRejectsBrowserKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(`{"api_key":"should-not-stick"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -298,6 +319,222 @@ func TestVercelRejectsBrowserKey(t *testing.T) {
 	handler.ServeHTTP(healthRec, health)
 	if healthRec.Code != http.StatusOK || !strings.Contains(healthRec.Body.String(), `"hosted":true`) {
 		t.Fatalf("hosted healthz = %d %s", healthRec.Code, healthRec.Body.String())
+	}
+}
+
+func TestSchemaCompilerAndSurgicalRepair(t *testing.T) {
+	schema := map[string]any{
+		"title": "MSAExtraction",
+		"type":  "object",
+		"properties": map[string]any{
+			"vendor_name":          map[string]any{"type": "string"},
+			"contract_value_usd":   map[string]any{"type": "number"},
+			"effective_date":       map[string]any{"type": "string"},
+			"notice_deadline_date": map[string]any{"type": "string"},
+			"auto_renews":          map[string]any{"type": "boolean"},
+		},
+	}
+	compiled, err := CompileJSONSchema(schema)
+	if err != nil || len(compiled.Fields) != 5 {
+		t.Fatalf("compile = %+v %v", compiled, err)
+	}
+	if !strings.Contains(compiled.Stub, "verify_field_notice_deadline_date") {
+		t.Fatalf("stub missing field noul: %s", compiled.Stub)
+	}
+
+	engine := NewCortexEngineWithKey("")
+	preset, _ := presetByID("sde_hallucinated_date")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{
+		ScenarioID: "sde_hallucinated_date",
+		Context:    preset.State,
+		Schema:     schema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.QuestionCount < 12 {
+		t.Fatalf("custom schema should expand fan-out, got %d", res.QuestionCount)
+	}
+	if res.Surgical == nil || !res.Surgical.Executed {
+		t.Fatalf("expected surgical patch, got %+v", res.Surgical)
+	}
+	found := false
+	for _, p := range res.Surgical.Patches {
+		if strings.Contains(p.Field, "notice") || strings.Contains(p.Field, "date") {
+			if stringify(p.After) != "10/02/2026" {
+				t.Fatalf("notice repair = %v want 10/02/2026 method=%s", p.After, p.Method)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing notice date patch: %+v", res.Surgical.Patches)
+	}
+}
+
+func TestSurgicalRepairUsesPresetStateAndLeavesLockedDates(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{ScenarioID: "sde_hallucinated_date"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Surgical == nil {
+		t.Fatal("expected surgical patch from scenario_id alone")
+	}
+	var notice, effective *FieldPatch
+	for i := range res.Surgical.Patches {
+		p := &res.Surgical.Patches[i]
+		if p.Field == "notice_deadline_date" {
+			notice = p
+		}
+		if p.Field == "effective_date" {
+			effective = p
+		}
+	}
+	if notice == nil || stringify(notice.After) != "10/02/2026" {
+		t.Fatalf("notice patch = %+v", notice)
+	}
+	if effective != nil {
+		t.Fatalf("locked effective_date must not be spliced: %+v", effective)
+	}
+	if stringify(res.Surgical.LockedJSON["effective_date"]) != "11/01/2025" {
+		t.Fatalf("locked JSON dropped effective_date: %+v", res.Surgical.LockedJSON)
+	}
+}
+
+func TestScoreLabelAndPartialThreshold(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	before := engine.GetThresholds()
+	engine.SetThresholds(PipelineThresholds{SecurityGateConfidence: 0.70})
+	after := engine.GetThresholds()
+	if after.CompositePassThreshold != before.CompositePassThreshold {
+		t.Fatalf("partial JSON must not zero composite: before=%.1f after=%.1f", before.CompositePassThreshold, after.CompositePassThreshold)
+	}
+	if after.SecurityGateConfidence != 0.70 {
+		t.Fatalf("security gate not updated: %+v", after)
+	}
+
+	preset, _ := presetByID("gw_rag_injection")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{Context: preset.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var harm QuestionView
+	for _, q := range res.Questions {
+		if q.ID == qHarmSeverity {
+			harm = q
+		}
+	}
+	if !strings.Contains(harm.SelectedChoice, "Severe") && !strings.Contains(harm.SelectedChoice, "Moderate") {
+		t.Fatalf("policy_harm_severity label = %q", harm.SelectedChoice)
+	}
+}
+
+func TestReadOnlyBootDoesNotMutateFlywheel(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	preset, _ := presetByID("rag_verified_fastpath")
+	_, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{
+		ScenarioID: "rag_verified_fastpath",
+		Context:    preset.State,
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine.GetFlywheel().DistilledGoldenExamples != 0 {
+		t.Fatalf("read-only boot mutated flywheel: %+v", engine.GetFlywheel())
+	}
+}
+
+func TestRejectPlainTextPOSTAndPublicKey(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	handler, err := NewServerHandler(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := httptest.NewRequest(http.MethodPost, "/api/evaluate", strings.NewReader(`{"context":{}}`))
+	plain.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, plain)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain POST = %d %s", rec.Code, rec.Body.String())
+	}
+
+	t.Setenv("PORT", "8090")
+	t.Setenv("VERCEL", "")
+	t.Setenv("VERCEL_ENV", "")
+	t.Setenv("VERCEL_URL", "")
+	t.Setenv("VERCEL_REGION", "")
+	keyReq := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(`{"api_key":"x"}`))
+	keyReq.Header.Set("Content-Type", "application/json")
+	keyReq.RemoteAddr = "203.0.113.9:4400"
+	keyRec := httptest.NewRecorder()
+	handler.ServeHTTP(keyRec, keyReq)
+	if keyRec.Code != http.StatusForbidden {
+		t.Fatalf("public bind /api/key = %d %s", keyRec.Code, keyRec.Body.String())
+	}
+}
+
+func TestSolverMeetsEscapeSLA(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	for _, id := range []string{"gw_rag_injection", "sde_hallucinated_date", "rag_verified_fastpath", "triage_auto_refund"} {
+		preset, _ := presetByID(id)
+		if _, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{ScenarioID: id, Context: preset.State}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	solved, ok := engine.solveAndRecommend(0.001)
+	if !ok || solved.Samples < 4 {
+		t.Fatalf("solver = %+v ok=%v", solved, ok)
+	}
+	if solved.EscapeRate > 0.001 {
+		t.Fatalf("escape rate %.4f exceeds SLA", solved.EscapeRate)
+	}
+}
+
+func TestInferExtraFieldsAndBacktest(t *testing.T) {
+	ctx := map[string]any{
+		"source_document": "Governing law is the State of Delaware. Payment terms are net 30.",
+		"mini_model_extraction": map[string]any{
+			"vendor_name":          "Northwind Analytics LLC",
+			"contract_value_usd":   120000,
+			"effective_date":       "11/01/2025",
+			"notice_deadline_date": "09/15/2026",
+			"auto_renews":          true,
+			"governing_law":        "State of Delaware",
+			"payment_terms_days":   30,
+		},
+	}
+	extra := InferExtraFields(ctx)
+	if len(extra) < 2 {
+		t.Fatalf("expected extra fields for governing_law / payment_terms, got %+v", extra)
+	}
+	engine := NewCortexEngineWithKey("")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{Context: ctx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.QuestionCount < 12 {
+		t.Fatalf("extra payload keys should expand fan-out, got %d", res.QuestionCount)
+	}
+	if res.AuditHash == "" || res.Scorer != "aegis_calibrated_simulator" {
+		t.Fatalf("audit/scorer missing: hash=%s scorer=%s", res.AuditHash, res.Scorer)
+	}
+
+	report, err := engine.RunBacktest(context.Background(), BacktestRequest{Synthetic: 8, MonthlyVolume: 10_000_000})
+	if err != nil || report.Turns != 8 {
+		t.Fatalf("backtest = %+v %v", report, err)
+	}
+	if report.MonthlyBaselineUSD <= report.MonthlyAegisUSD {
+		t.Fatalf("expected modeled monthly savings: %+v", report)
+	}
+}
+
+func TestEngineKeyPrefersAegis(t *testing.T) {
+	t.Setenv("TYPESAFE_API_KEY", "legacy")
+	t.Setenv("AEGIS_ENGINE_KEY", "first-party")
+	if got := EngineKeyFromEnv(); got != "first-party" {
+		t.Fatalf("EngineKeyFromEnv = %q", got)
 	}
 }
 

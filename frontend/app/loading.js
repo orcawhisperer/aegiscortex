@@ -3,7 +3,7 @@ export default function Loading() {
     <>
       <p className="folio">
         <span>Setting the sheet</span>
-        <span>TypeSafe Jev-1.13 · Next.js + Gin</span>
+        <span>Aegis Speculative Control Plane · v1.0</span>
         <span>SSR</span>
       </p>
       <header className="masthead">

@@ -22,8 +22,8 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata = {
-  title: "AegisCortex",
-  description: "Eleven questions. One route. Costs modeled, not spent.",
+  title: "Aegis Speculative Control Plane · v1.0",
+  description: "Bind any schema. Repair one field. Calibrate τ. Control plane P50 114 ms.",
   icons: { icon: "/favicon.svg" },
 };
 
