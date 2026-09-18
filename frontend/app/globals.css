@@ -81,7 +81,7 @@ h2 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
 
 .standfirst {
   margin: 0.55rem 0 0;
-  max-width: 22rem;
+  max-width: 34rem;
   font-family: var(--serif);
   font-size: 1.05rem;
   color: var(--muted);
@@ -227,6 +227,13 @@ textarea:focus-visible {
 .scenario-title { font-family: var(--serif); font-size: 1rem; }
 .scenario-tag { font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
 .scenario-desc { margin: 0.22rem 0 0; font-size: 0.8rem; color: var(--muted); }
+.scenario-outcome {
+  margin: 0.18rem 0 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mark);
+}
 
 .sliders { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 0.55rem; }
 .sliders label {
@@ -473,6 +480,126 @@ th {
   padding: 0 0.04em;
 }
 
+.clickable-row { cursor: pointer; }
+.clickable-row:hover,
+.clickable-row:focus-visible { background: rgba(143, 42, 31, 0.06); }
+.clickable-row.inked { box-shadow: inset 3px 0 0 var(--mark); }
+
+.tau-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  min-width: 8.5rem;
+}
+.tau-track {
+  position: relative;
+  height: 0.42rem;
+  border: 1px solid var(--ink);
+  background: var(--wash);
+}
+.tau-fill {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+}
+.tau-meter.fail .tau-fill { background: var(--mark); }
+.tau-meter.pass .tau-fill { background: var(--ok); }
+.tau-hair {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--ink);
+  box-shadow: 0 0 0 1px var(--paper);
+}
+.tau-readout { font-family: var(--mono); font-size: 0.72rem; }
+.tau-cut { color: var(--muted); }
+
+.primer, .anatomy, .fold {
+  margin: 0;
+  padding: 0.55rem 1.6rem 0.7rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--wash);
+}
+.fold {
+  padding: 0.35rem 0 0.55rem;
+  border-bottom: 0;
+  background: transparent;
+}
+.primer summary,
+.anatomy summary,
+.fold summary {
+  cursor: pointer;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.primer-body { max-width: 48rem; }
+.primer-body p { margin: 0.55rem 0 0; font-size: 0.88rem; }
+.primer-body dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.55rem 1.2rem;
+  margin: 0.7rem 0 0;
+}
+.primer-body dt {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+.primer-body dd { margin: 0.12rem 0 0; font-size: 0.8rem; color: var(--muted); }
+.primer-story { font-family: var(--serif); }
+
+.anatomy-flow {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1fr;
+  gap: 1rem;
+  margin-top: 0.55rem;
+}
+.anatomy-k {
+  margin: 0 0 0.25rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.anatomy-col p { margin: 0; font-size: 0.82rem; }
+.anatomy-fan ul {
+  margin: 0.4rem 0 0;
+  padding: 0 0 0 1rem;
+  font-size: 0.78rem;
+}
+.anatomy-routes { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.35rem; }
+.anatomy-route {
+  text-align: left;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--rule);
+  padding: 0.28rem 0.45rem;
+  font-size: 0.78rem;
+}
+.anatomy-route em { float: right; font-style: normal; color: var(--muted); }
+.anatomy-route.active {
+  border-color: var(--ink);
+  box-shadow: inset 3px 0 0 var(--mark);
+}
+
+.ribbon {
+  margin: 0 0 0.85rem;
+  padding: 0.55rem 0.7rem 0.65rem;
+  border: 1px solid var(--ink);
+  background: var(--wash);
+  font-size: 0.86rem;
+  max-width: 46rem;
+}
+.ribbon strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 pre.sdk {
   margin: 0.4rem 0 0;
   padding: 0.65rem 0.75rem;
@@ -487,6 +614,7 @@ pre.sdk {
 
 @media (max-width: 960px) {
   .folio { flex-wrap: wrap; }
+  .anatomy-flow { grid-template-columns: 1fr; }
   .ledger, .sheet { grid-template-columns: 1fr; }
   .ledger div { border-right: 0; border-bottom: 1px solid var(--rule); }
   .ledger div:last-child { border-bottom: 0; }
@@ -506,6 +634,8 @@ pre.sdk {
   .sliders,
   .moat-actions,
   .cases,
+  .primer,
+  .anatomy,
   .schema-box,
   #schema-editor,
   #context-editor,

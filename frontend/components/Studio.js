@@ -5,6 +5,10 @@ import { replayRuling, raceModel } from "../lib/decide-route.cjs";
 import { exportSnippets } from "../lib/export-sdk";
 import { highlightPayload, needleForRow } from "../lib/highlight";
 import { writeStudioURL, sha256Hex } from "../lib/permalink";
+import { watchFor } from "../lib/watch-copy";
+import Anatomy from "./Anatomy";
+import Primer from "./Primer";
+import TauBar from "./TauBar";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/svc/api";
 
@@ -31,7 +35,7 @@ function money(n) {
   return `$${(n || 0).toFixed(6)}`;
 }
 
-function Table({ caption, headers, rows, rowClasses, onRowClick }) {
+function Table({ caption, headers, rows, rowClasses, onRowClick, selectedIndex }) {
   return (
     <table>
       {caption ? <caption>{caption}</caption> : null}
@@ -46,7 +50,7 @@ function Table({ caption, headers, rows, rowClasses, onRowClick }) {
         {rows.map((cells, i) => (
           <tr
             key={i}
-            className={rowClasses?.[i] || ""}
+            className={`${rowClasses?.[i] || ""} ${onRowClick ? "clickable-row" : ""} ${selectedIndex === i ? "inked" : ""}`.trim()}
             onClick={onRowClick ? () => onRowClick(i) : undefined}
             onKeyDown={
               onRowClick
@@ -59,7 +63,6 @@ function Table({ caption, headers, rows, rowClasses, onRowClick }) {
                 : undefined
             }
             tabIndex={onRowClick ? 0 : undefined}
-            style={onRowClick ? { cursor: "pointer" } : undefined}
           >
             {cells.map((c, j) => (
               <td key={j}>{c}</td>
@@ -108,7 +111,9 @@ export default function Studio({ boot, permalink }) {
   const [sdkLang, setSdkLang] = useState("go");
   const [backtest, setBacktest] = useState(null);
   const [printHash, setPrintHash] = useState("");
+  const [inked, setInked] = useState({ table: "", index: -1 });
   const evalAbort = useRef(null);
+  const markBox = useRef(null);
   const [pending, startTransition] = useTransition();
 
   const evalRes = useMemo(() => replayRuling(rawEval, thresholds) || rawEval, [rawEval, thresholds]);
@@ -222,8 +227,24 @@ export default function Studio({ boot, permalink }) {
     const raw = JSON.stringify(preset.context, null, 2);
     setContextJSON(raw);
     setHighlight("");
+    setInked({ table: "", index: -1 });
     evaluate(preset.id, raw);
   }
+
+  function pickCaseId(id) {
+    const preset = presets.find((p) => p.id === id);
+    if (preset) selectCase(preset);
+  }
+
+  function ink(table, index, needle) {
+    setInked({ table, index });
+    setHighlight(needle);
+  }
+
+  useEffect(() => {
+    if (!highlight || !markBox.current) return;
+    markBox.current.querySelector("mark")?.scrollIntoView({ block: "center", inline: "nearest" });
+  }, [highlight]);
 
   function onCaseKey(ev, index) {
     if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp") return;
@@ -371,7 +392,7 @@ export default function Studio({ boot, permalink }) {
       <header className="masthead">
         <div className="masthead-left">
           <h1>AegisCortex</h1>
-          <p className="standfirst">Bind any schema. Repair one field. Calibrate τ.</p>
+          <p className="standfirst">Eleven cheap questions decide: block an attack, repair one field, serve the draft, or fire a tool — before a frontier model spends tokens.</p>
         </div>
         <div className="masthead-right">
           <p className={live ? "mode live" : "mode sim"} aria-live="polite">{modeLabel}</p>
@@ -386,6 +407,9 @@ export default function Studio({ boot, permalink }) {
           )}
         </div>
       </header>
+
+      <Primer />
+      <Anatomy evalRes={evalRes} thresholds={thresholds} onPickRoute={pickCaseId} />
 
       <section className="ledger" aria-label="Run figures">
         <div>
@@ -425,6 +449,7 @@ export default function Studio({ boot, permalink }) {
                   <span className="scenario-title"><span className="scenario-index">{String(i + 1).padStart(2, "0")}</span>{p.title}</span>
                   <span className="scenario-tag">{p.badge}</span>
                 </div>
+                <p className="scenario-outcome">{watchFor(p.id).outcome}</p>
                 <p className="scenario-desc">{p.description}</p>
               </button>
             ))}
@@ -437,10 +462,10 @@ export default function Studio({ boot, permalink }) {
           </div>
           <div className="sliders">
             {[
-              ["security_gate_confidence", "Security", 0.5, 0.99, 0.01, 2],
-              ["field_verify_confidence", "Field", 0.5, 0.99, 0.01, 2],
-              ["router_confidence", "Router", 0.5, 0.99, 0.01, 2],
-              ["composite_pass_threshold", "Composite", 30, 95, 1, 0],
+              ["security_gate_confidence", "τ_sec · Security", 0.5, 0.99, 0.01, 2],
+              ["field_verify_confidence", "τ_field · Field", 0.5, 0.99, 0.01, 2],
+              ["router_confidence", "τ_route · Router", 0.5, 0.99, 0.01, 2],
+              ["composite_pass_threshold", "τ_comp · Composite", 30, 95, 1, 0],
             ].map(([key, label, min, max, step, digits]) => (
               <label key={key}>
                 {label} <b>{Number(thresholds[key]).toFixed(digits)}</b>
@@ -457,40 +482,54 @@ export default function Studio({ boot, permalink }) {
             <button type="button" onClick={runPortfolio}>Run all 4</button>
           </div>
 
-          <h2>Schema</h2>
-          <p className="note">New keys in <code>extracted_fields</code> / <code>mini_model_extraction</code> become field nouls automatically. Bind a full schema to replace the default four.</p>
-          <textarea id="schema-editor" className="schema-box" spellCheck={false} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} />
-          <div className="moat-actions">
-            <button type="button" onClick={compileSchema}>Bind schema</button>
-            <button type="button" className="linkish" onClick={() => { setUseSchema(false); setCompiled(null); }}>Default + extras</button>
-          </div>
+          <details className="fold">
+            <summary>Schema {useSchema ? "· bound" : "· default + extras"}</summary>
+            <p className="note">New keys in <code>extracted_fields</code> / <code>mini_model_extraction</code> become field nouls automatically. Bind a full schema to replace the default four.</p>
+            <textarea id="schema-editor" className="schema-box" spellCheck={false} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} />
+            <div className="moat-actions">
+              <button type="button" onClick={compileSchema}>Bind schema</button>
+              <button type="button" className="linkish" onClick={() => { setUseSchema(false); setCompiled(null); }}>Default + extras</button>
+            </div>
+          </details>
 
           <div className="run-row">
             <h2>Payload</h2>
-            <button type="button" onClick={() => evaluate(activeId, contextJSON)}>Evaluate</button>
+            <div className="moat-actions">
+              {highlight ? (
+                <button type="button" className="linkish" onClick={() => { setHighlight(""); setInked({ table: "", index: -1 }); }}>Clear mark / edit JSON</button>
+              ) : null}
+              <button type="button" onClick={() => evaluate(activeId, contextJSON)}>Evaluate</button>
+            </div>
           </div>
           {highlight ? (
-            <pre className="payload-mark" aria-label="Highlighted payload">{marked.map((p, i) => p.mark ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>)}</pre>
-          ) : null}
-          <textarea id="context-editor" spellCheck={false} value={contextJSON} onChange={(e) => setContextJSON(e.target.value)} onKeyDown={(ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); evaluate(activeId, contextJSON); } }} />
+            <pre ref={markBox} className="payload-mark" aria-label="Highlighted payload">{marked.map((p, i) => p.mark ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>)}</pre>
+          ) : (
+            <textarea id="context-editor" spellCheck={false} value={contextJSON} onChange={(e) => setContextJSON(e.target.value)} onKeyDown={(ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); evaluate(activeId, contextJSON); } }} />
+          )}
           <p className={statusError ? "status error" : "status"} role="status">{status}</p>
 
-          <h2>FinOps batch</h2>
-          <div className="moat-actions">
-            <button type="button" onClick={() => runBacktest("", 50)}>50-turn synthetic</button>
-            <label className="linkish">
-              Upload .jsonl
-              <input type="file" accept=".jsonl,application/jsonl,text/plain" className="sr-only" onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                runBacktest(await file.text(), 0);
-                e.target.value = "";
-              }} />
-            </label>
-          </div>
+          <details className="fold">
+            <summary>FinOps batch</summary>
+            <div className="moat-actions">
+              <button type="button" onClick={() => runBacktest("", 50)}>50-turn synthetic</button>
+              <label className="linkish">
+                Upload .jsonl
+                <input type="file" accept=".jsonl,application/jsonl,text/plain" className="sr-only" onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  runBacktest(await file.text(), 0);
+                  e.target.value = "";
+                }} />
+              </label>
+            </div>
+          </details>
         </aside>
 
         <section className="copy">
+          <p className="ribbon" role="note">
+            <strong>What to watch · {watchFor(activeId).outcome}</strong>
+            {watchFor(activeId).ribbon}
+          </p>
           <p className="kicker">Ruling</p>
           <div className="verdict-line">
             <h2>{evalRes?.final_route_tier || "—"}</h2>
@@ -566,25 +605,37 @@ export default function Studio({ boot, permalink }) {
 
           <h2>Fields</h2>
           <Table
-            caption="Click a row to ink the trigger in the payload"
-            headers={["Field", "P(yes)", "Conf", "Gate"]}
-            rows={fields.map((f) => [f.field_name, `${(f.yes_prob * 100).toFixed(0)}%`, f.confidence.toFixed(2), f.verified ? "lock" : "repair"])}
+            caption="Click a row to ink the trigger. Hairline is the live Field τ."
+            headers={["Field", "P(yes) vs τ", "Conf", "Gate"]}
+            rows={fields.map((f) => [
+              f.field_name,
+              <TauBar key={f.field_name} value={f.yes_prob} tau={thresholds.field_verify_confidence} />,
+              f.confidence.toFixed(2),
+              f.verified ? "lock" : "repair",
+            ])}
             rowClasses={fields.map((f) => (f.verified ? "ok" : "fail"))}
-            onRowClick={(i) => setHighlight(needleForRow(fields[i].field_name, rawEval?.evidence, contextJSON) || fields[i].field_name)}
+            selectedIndex={inked.table === "fields" ? inked.index : -1}
+            onRowClick={(i) => ink("fields", i, needleForRow(fields[i].field_name, rawEval?.evidence, contextJSON) || fields[i].field_name)}
           />
 
           <h2>Questions</h2>
           <Table
-            caption="Click a row to underline the evidence span"
-            headers={["Question", "Stage", "Answer", "P", "Gate"]}
-            rows={questions.map((q) => [
-              <div key={q.id}><div>{q.id}</div><div className="q-prompt">{q.prompt}</div></div>,
-              q.stage,
-              q.selected_choice,
-              `${(q.top_probability * 100).toFixed(0)}%`,
-              String(q.route_reason || "").replace("Gate: ", ""),
-            ])}
-            onRowClick={(i) => setHighlight(needleForRow(questions[i].id, rawEval?.evidence, contextJSON) || questions[i].id)}
+            caption="Click a row to underline the evidence. Hairline follows the matching τ."
+            headers={["Question", "Stage", "Answer", "P vs τ", "Gate"]}
+            rows={questions.map((q) => {
+              const isField = String(q.id || "").startsWith("verify_field_") || q.id === "verify_rag_claim_grounding";
+              const isSec = ["jailbreak_attempt", "indirect_prompt_injection", "credential_or_pii_exposure"].includes(q.id);
+              const tau = isField ? thresholds.field_verify_confidence : isSec ? thresholds.security_gate_confidence : thresholds.router_confidence;
+              return [
+                <div key={q.id}><div>{q.id}</div><div className="q-prompt">{q.prompt}</div></div>,
+                q.stage,
+                q.selected_choice,
+                <TauBar key={`${q.id}-tau`} value={q.top_probability} tau={tau} />,
+                String(q.route_reason || "").replace("Gate: ", ""),
+              ];
+            })}
+            selectedIndex={inked.table === "questions" ? inked.index : -1}
+            onRowClick={(i) => ink("questions", i, needleForRow(questions[i].id, rawEval?.evidence, contextJSON) || questions[i].id)}
           />
 
           <h2>Code / SDK</h2>
