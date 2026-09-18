@@ -225,6 +225,59 @@ func TestInspectStateHallucination(t *testing.T) {
 	}
 }
 
+func TestListenAddrLocalAndVercel(t *testing.T) {
+	t.Setenv("VERCEL", "")
+	t.Setenv("VERCEL_ENV", "")
+	t.Setenv("AEGIS_ADDR", "")
+	addr, err := listenAddr()
+	if err != nil || addr != defaultBindAddr {
+		t.Fatalf("default addr = %q %v", addr, err)
+	}
+
+	t.Setenv("AEGIS_ADDR", "0.0.0.0:8090")
+	if _, err := listenAddr(); err == nil {
+		t.Fatal("expected loopback policy to reject 0.0.0.0")
+	}
+
+	t.Setenv("VERCEL", "1")
+	t.Setenv("PORT", "8080")
+	addr, err = listenAddr()
+	if err != nil || addr != ":8080" {
+		t.Fatalf("vercel addr = %q %v", addr, err)
+	}
+}
+
+func TestVercelRejectsBrowserKey(t *testing.T) {
+	t.Setenv("VERCEL", "1")
+	engine := NewCortexEngineWithKey("")
+	handler, err := NewServerHandler(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(`{"api_key":"should-not-stick"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("hosted /api/key = %d %s", rec.Code, rec.Body.String())
+	}
+	if engine.HasAPIKey() {
+		t.Fatal("hosted POST /api/key must not store a key")
+	}
+
+	root := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootRec := httptest.NewRecorder()
+	handler.ServeHTTP(rootRec, root)
+	if rootRec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d", rootRec.Code)
+	}
+	if strings.Contains(rootRec.Body.String(), `id="key-form"`) {
+		t.Fatal("hosted studio must hide the browser key form")
+	}
+	if !strings.Contains(rootRec.Body.String(), "Vercel edition") {
+		t.Fatal("expected Vercel folio")
+	}
+}
+
 func TestLiveTypeSafeFanout(t *testing.T) {
 	key := strings.TrimSpace(os.Getenv("TYPESAFE_API_KEY"))
 	if key == "" {

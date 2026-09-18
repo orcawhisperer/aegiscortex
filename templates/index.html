@@ -9,9 +9,9 @@
 </head>
 <body>
   <p class="folio">
-    <span>Loopback edition</span>
+    <span>{{ if .Hosted }}Vercel edition{{ else }}Loopback edition{{ end }}</span>
     <span>TypeSafe Jev-1.13 · sdk-go 0.6.0</span>
-    <span>127.0.0.1:8090</span>
+    <span>{{ if .Hosted }}Fluid Compute{{ else }}127.0.0.1:8090{{ end }}</span>
   </p>
 
   <header class="masthead">
@@ -23,11 +23,15 @@
       <p id="mode-indicator" class="mode {{ if .HasAPIKey }}live{{ else }}sim{{ end }}">
         <span id="mode-text">{{ if .HasAPIKey }}Live API{{ else }}Simulator{{ end }}</span>
       </p>
+      {{ if not .Hosted }}
       <form id="key-form" class="key-form" autocomplete="off">
         <label class="sr-only" for="api-key-input">TypeSafe API key</label>
         <input id="api-key-input" type="password" name="api_key" placeholder="API key" spellcheck="false" />
         <button id="save-key-btn" type="submit">Hold in memory</button>
       </form>
+      {{ else }}
+      <p class="note">Live Jev uses the server <code>TYPESAFE_API_KEY</code> env var.</p>
+      {{ end }}
     </div>
   </header>
 
@@ -144,7 +148,7 @@
   </main>
 
   <footer class="colophon">
-    Local workbench. The key never leaves this process. Routes come from the payload, not the case name.
+    {{ if .Hosted }}Hosted workbench. Thresholds and the run log are per-instance and do not persist. Routes come from the payload, not the case name.{{ else }}Local workbench. The key never leaves this process. Routes come from the payload, not the case name.{{ end }}
   </footer>
 
   <script id="boot-data" type="application/json">{{ .BootJSON }}</script>

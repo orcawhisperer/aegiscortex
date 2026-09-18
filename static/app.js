@@ -313,7 +313,8 @@
       syncThresholds();
     });
 
-    $("key-form").addEventListener("submit", function (ev) {
+    var keyForm = $("key-form");
+    if (keyForm) keyForm.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var input = $("api-key-input");
       var keyVal = input ? input.value.trim() : "";

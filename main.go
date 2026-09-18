@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -23,6 +24,7 @@ const defaultBindAddr = "127.0.0.1:8090"
 type PageTemplateData struct {
 	Title              string
 	HasAPIKey          bool
+	Hosted             bool
 	Presets            []ScenarioPreset
 	Thresholds         PipelineThresholds
 	InitialEval        EvaluationResponse
@@ -88,6 +90,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":          true,
 			"has_api_key": engine.HasAPIKey(),
+			"hosted":      hostedOnVercel(),
 		})
 	})
 
@@ -125,6 +128,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		data := PageTemplateData{
 			Title:              "AegisCortex",
 			HasAPIKey:          engine.HasAPIKey(),
+			Hosted:             hostedOnVercel(),
 			Presets:            presets,
 			Thresholds:         engine.GetThresholds(),
 			InitialEval:        initialEval,
@@ -198,6 +202,12 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if hostedOnVercel() {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "On Vercel, set TYPESAFE_API_KEY in project environment variables. Browser key hold is local-only.",
+			})
+			return
+		}
 		var body struct {
 			APIKey string `json:"api_key"`
 		}
@@ -219,6 +229,31 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 	return SecurityHeadersMiddleware(mux), nil
 }
 
+func hostedOnVercel() bool {
+	return os.Getenv("VERCEL") == "1" || os.Getenv("VERCEL_ENV") != ""
+}
+
+func listenAddr() (string, error) {
+	if hostedOnVercel() {
+		port := strings.TrimSpace(os.Getenv("PORT"))
+		if port == "" {
+			port = "3000"
+		}
+		if strings.ContainsAny(port, ":/") {
+			return "", fmt.Errorf("invalid PORT %q", port)
+		}
+		return ":" + port, nil
+	}
+	addr := strings.TrimSpace(os.Getenv("AEGIS_ADDR"))
+	if addr == "" {
+		addr = defaultBindAddr
+	}
+	if !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:") {
+		return "", fmt.Errorf("AEGIS_ADDR must bind to 127.0.0.1 or localhost, got %q", addr)
+	}
+	return addr, nil
+}
+
 func marshalBoot(v any) template.JS {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -237,12 +272,9 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func main() {
-	addr := strings.TrimSpace(os.Getenv("AEGIS_ADDR"))
-	if addr == "" {
-		addr = defaultBindAddr
-	}
-	if !strings.HasPrefix(addr, "127.0.0.1:") && !strings.HasPrefix(addr, "localhost:") {
-		log.Fatalf("security policy violation: AEGIS_ADDR must bind to 127.0.0.1 or localhost, got %q", addr)
+	addr, err := listenAddr()
+	if err != nil {
+		log.Fatalf("security policy violation: %v", err)
 	}
 
 	engine := NewCortexEngineWithKey(os.Getenv("TYPESAFE_API_KEY"))
