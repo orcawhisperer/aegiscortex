@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,7 +19,7 @@ var embeddedAssets embed.FS
 
 const defaultBindAddr = "127.0.0.1:8090"
 
-// PageTemplateData holds the server-side rendered data for templates/index.html.
+// PageTemplateData is the server-rendered shell plus a JSON boot payload.
 type PageTemplateData struct {
 	Title              string
 	HasAPIKey          bool
@@ -26,30 +28,40 @@ type PageTemplateData struct {
 	InitialEval        EvaluationResponse
 	InitialContextJSON string
 	Flywheel           FlywheelTelemetryView
+	BootJSON           template.JS
 }
 
-// SecurityHeadersMiddleware enforces mandatory web security headers and HTTP verb restrictions.
+type bootPayload struct {
+	HasAPIKey  bool                  `json:"has_api_key"`
+	Presets    []ScenarioPreset      `json:"presets"`
+	Thresholds PipelineThresholds    `json:"thresholds"`
+	Eval       EvaluationResponse    `json:"eval"`
+	Flywheel   FlywheelTelemetryView `json:"flywheel"`
+}
+
+// SecurityHeadersMiddleware enforces web security headers and HTTP verb restrictions.
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(
 			"Content-Security-Policy",
-			"default-src 'self'; script-src 'self' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+			"default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'",
 		)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("X-DNS-Prefetch-Control", "off")
 
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 
-		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB payload bound
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -62,11 +74,23 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
-
-	// Static assets (/static/styles.css, /static/app.js)
 	mux.Handle("/static/", http.FileServer(http.FS(embeddedAssets)))
 
-	// GET / -> Render templates/index.html via Go html/template with initial evaluation telemetry
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, embeddedAssets, "static/favicon.svg")
+	})
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":          true,
+			"has_api_key": engine.HasAPIKey(),
+		})
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -87,7 +111,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 		ctxBytes, _ := json.MarshalIndent(defaultContext, "", "  ")
 
-		evalCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		evalCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		initialEval, err := engine.EvaluateRequest(evalCtx, EvaluationRequest{
 			ScenarioID: "rag_verified_fastpath",
@@ -99,7 +123,7 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 
 		data := PageTemplateData{
-			Title:              "AegisCortex — 100ms Speculative AI Control Plane & Arbitrage Studio",
+			Title:              "AegisCortex",
 			HasAPIKey:          engine.HasAPIKey(),
 			Presets:            presets,
 			Thresholds:         engine.GetThresholds(),
@@ -107,6 +131,13 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			InitialContextJSON: string(ctxBytes),
 			Flywheel:           engine.GetFlywheel(),
 		}
+		data.BootJSON = marshalBoot(bootPayload{
+			HasAPIKey:  data.HasAPIKey,
+			Presets:    data.Presets,
+			Thresholds: data.Thresholds,
+			Eval:       data.InitialEval,
+			Flywheel:   data.Flywheel,
+		})
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, data); err != nil {
@@ -114,7 +145,6 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		}
 	})
 
-	// GET /api/state
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -125,10 +155,10 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			"presets":     engine.GetPresets(),
 			"thresholds":  engine.GetThresholds(),
 			"flywheel":    engine.GetFlywheel(),
+			"sdk_version": "0.6.0",
 		})
 	})
 
-	// POST /api/evaluate
 	mux.HandleFunc("/api/evaluate", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -139,17 +169,16 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
 			return
 		}
-		evalCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		evalCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		res, err := engine.EvaluateRequest(evalCtx, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "evaluation failed"})
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
 
-	// POST /api/thresholds
 	mux.HandleFunc("/api/thresholds", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -164,7 +193,6 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 		writeJSON(w, http.StatusOK, engine.GetThresholds())
 	})
 
-	// POST /api/key
 	mux.HandleFunc("/api/key", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -189,6 +217,17 @@ func NewServerHandler(engine *CortexEngine) (http.Handler, error) {
 	})
 
 	return SecurityHeadersMiddleware(mux), nil
+}
+
+func marshalBoot(v any) template.JS {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "null"
+	}
+	s := strings.ReplaceAll(string(b), "<", `\u003c`)
+	s = strings.ReplaceAll(s, "\u2028", `\u2028`)
+	s = strings.ReplaceAll(s, "\u2029", `\u2029`)
+	return template.JS(s)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -217,12 +256,30 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      35 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("AegisCortex Speculative 100ms AI Control Plane listening on http://%s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("AegisCortex listening on http://%s (sim unless TYPESAFE_API_KEY is set)", addr)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	case sig := <-sigCh:
+		log.Printf("received %s, shutting down", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("graceful shutdown error: %v", err)
+		}
 	}
 }

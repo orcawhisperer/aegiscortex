@@ -4,300 +4,250 @@
   var state = {
     presets: [],
     activeScenarioId: "rag_verified_fastpath",
-    thresholds: {
-      security_gate_confidence: 0.85,
-      field_verify_confidence: 0.90,
-      router_confidence: 0.80,
-      composite_pass_threshold: 68.0
-    }
+    flywheel: null,
+    debounceTimer: null
   };
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
-    if (className) {
-      node.className = className;
-    }
-    if (text !== undefined && text !== null) {
-      node.textContent = String(text);
-    }
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
     return node;
   }
 
-  function setStatus(msg, isError) {
-    var banner = document.getElementById("status-banner");
-    if (!banner) return;
-    banner.textContent = msg;
-    banner.className = isError
-      ? "mt-2.5 px-3 py-2 rounded-lg bg-rose-950/50 border border-rose-500/50 font-mono text-xs text-rose-300"
-      : "mt-2.5 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800/80 font-mono text-xs text-sky-300";
+  function $(id) {
+    return document.getElementById(id);
   }
 
-  function updateModePill(mode, hasKey) {
-    var pill = document.getElementById("mode-indicator");
-    var textNode = document.getElementById("mode-text");
+  function setStatus(msg, isError) {
+    var banner = $("status-banner");
+    if (!banner) return;
+    banner.textContent = msg;
+    banner.className = isError ? "status error" : "status";
+  }
+
+  function updateModePill(mode, hasKey, fallback) {
+    var pill = $("mode-indicator");
+    var textNode = $("mode-text");
     if (!pill || !textNode) return;
-    if (hasKey || mode === "LIVE_TYPESAFE_API") {
-      pill.className = "mode-pill mode-live flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold border";
-      textNode.textContent = "LIVE TYPESAFE API (JEV-1.13)";
+    var live = hasKey || mode === "LIVE_TYPESAFE_API";
+    pill.className = "mode " + (live && !fallback ? "live" : "sim");
+    if (fallback) {
+      textNode.textContent = "Live failed — simulator";
+    } else if (live) {
+      textNode.textContent = "Live API";
     } else {
-      pill.className = "mode-pill mode-sim flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold border";
-      textNode.textContent = "CALIBRATED JEV-1.13 RLCD ENGINE";
+      textNode.textContent = "Simulator";
     }
   }
 
   function renderScenarioButtons() {
-    var container = document.getElementById("scenario-list");
-    if (!container || !state.presets.length) return;
+    var container = $("scenario-list");
+    if (!container) return;
     var nodes = [];
-
     for (var i = 0; i < state.presets.length; i++) {
       var p = state.presets[i];
-      var isActive = p.id === state.activeScenarioId;
-      var btnClass = isActive
-        ? "scenario-btn active w-full text-left p-3 rounded-lg bg-sky-950/30 border border-sky-400 transition"
-        : "scenario-btn w-full text-left p-3 rounded-lg bg-slate-950/80 border border-slate-800 hover:border-sky-400/60 transition";
-
-      var btn = el("button", btnClass);
+      var btn = el("button", "scenario-btn" + (p.id === state.activeScenarioId ? " active" : ""));
       btn.type = "button";
       btn.setAttribute("data-scenario-id", p.id);
-
-      var topRow = el("div", "flex items-center justify-between mb-1");
-      var titleSpan = el("span", "font-bold text-xs text-slate-100", p.title);
-      var badgeSpan = el("span", "font-mono text-[10px] px-2 py-0.5 rounded bg-sky-500/15 text-sky-300", p.badge);
-      topRow.appendChild(titleSpan);
-      topRow.appendChild(badgeSpan);
-
-      var descP = el("p", "text-xs text-slate-400 leading-relaxed", p.description);
-      btn.appendChild(topRow);
-      btn.appendChild(descP);
-
+      var top = el("div", "scenario-top");
+      var title = el("span", "scenario-title");
+      title.appendChild(el("span", "scenario-index", String(i + 1).padStart(2, "0")));
+      title.appendChild(document.createTextNode(p.title));
+      top.appendChild(title);
+      top.appendChild(el("span", "scenario-tag", p.badge));
+      btn.appendChild(top);
+      btn.appendChild(el("p", "scenario-desc", p.description));
       (function (preset) {
         btn.addEventListener("click", function () {
           state.activeScenarioId = preset.id;
-          var editor = document.getElementById("context-editor");
-          if (editor) {
-            editor.value = JSON.stringify(preset.context, null, 2);
-          }
+          var editor = $("context-editor");
+          if (editor) editor.value = JSON.stringify(preset.context, null, 2);
           renderScenarioButtons();
-          evaluateCurrent(preset.id);
+          evaluateCurrent();
         });
       })(p);
-
       nodes.push(btn);
     }
-
     container.replaceChildren.apply(container, nodes);
   }
 
+  function renderTable(container, headers, rows, rowClasses) {
+    var table = el("table");
+    var thead = el("thead");
+    var hr = el("tr");
+    headers.forEach(function (h) { hr.appendChild(el("th", null, h)); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (cells, i) {
+      var tr = el("tr", rowClasses && rowClasses[i] ? rowClasses[i] : "");
+      cells.forEach(function (c) {
+        var td = el("td");
+        if (c && c.nodeType) td.appendChild(c);
+        else td.textContent = c == null ? "" : String(c);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    container.replaceChildren(table);
+  }
+
   function renderFieldVerifications(fields) {
-    var grid = document.getElementById("field-verifications-grid");
+    var grid = $("field-verifications-grid");
     if (!grid) return;
-    var cards = [];
-
-    for (var i = 0; i < fields.length; i++) {
+    var rows = [];
+    var cls = [];
+    for (var i = 0; i < (fields || []).length; i++) {
       var f = fields[i];
-      var cardClass = f.verified
-        ? "field-card field-verified bg-slate-950/90 border border-emerald-500/40 rounded-lg p-3.5"
-        : "field-card field-failed bg-rose-950/20 border border-rose-500/60 rounded-lg p-3.5";
-
-      var card = el("div", cardClass);
-
-      var top = el("div", "flex items-center justify-between mb-1.5");
-      var nameSpan = el("span", "font-mono text-xs font-bold text-slate-100", f.field_name);
-      var badge = el(
-        "span",
-        f.verified
-          ? "font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300"
-          : "font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300",
-        f.verified ? "LOCKED_OK" : "ESCALATE_FIELD"
-      );
-      top.appendChild(nameSpan);
-      top.appendChild(badge);
-
-      var probs = el(
-        "div",
-        "font-mono text-[11px] text-slate-400 mb-2",
-        "P(YES)=" + (f.yes_prob * 100).toFixed(1) + "% | P(NO)=" + (f.no_prob * 100).toFixed(1) + "% | conf=" + f.confidence.toFixed(2)
-      );
-
-      var barWrap = el("div", "w-full h-1.5 bg-slate-900 rounded-full overflow-hidden mb-2");
-      var barFill = el(
-        "div",
-        f.verified ? "h-full bg-emerald-400" : "h-full bg-rose-500"
-      );
-      barFill.style.width = Math.max(4, Math.min(100, Math.round(f.yes_prob * 100))) + "%";
-      barWrap.appendChild(barFill);
-
-      var actionNote = el(
-        "div",
-        f.verified ? "font-mono text-[11px] text-emerald-300" : "font-mono text-[11px] text-rose-300 font-semibold",
-        f.action
-      );
-
-      card.appendChild(top);
-      card.appendChild(probs);
-      card.appendChild(barWrap);
-      card.appendChild(actionNote);
-      cards.push(card);
+      rows.push([
+        f.field_name,
+        (f.yes_prob * 100).toFixed(0) + "%",
+        f.confidence.toFixed(2),
+        f.verified ? "lock" : "repair"
+      ]);
+      cls.push(f.verified ? "ok" : "fail");
     }
-
-    grid.replaceChildren.apply(grid, cards);
+    renderTable(grid, ["Field", "P(yes)", "Conf", "Gate"], rows, cls);
   }
 
   function renderQuestionsMatrix(questions) {
-    var matrix = document.getElementById("questions-matrix");
+    var matrix = $("questions-matrix");
     if (!matrix) return;
-    var cards = [];
-
-    for (var i = 0; i < questions.length; i++) {
+    var rows = [];
+    for (var i = 0; i < (questions || []).length; i++) {
       var q = questions[i];
-      var card = el("div", "bg-slate-950/85 border border-slate-800 rounded-lg p-3.5");
-
-      var top = el("div", "flex items-center justify-between gap-2 mb-1.5");
-      var idSpan = el("span", "font-mono text-xs font-bold text-sky-400", q.id);
-
-      var badgeWrap = el("div", "flex items-center gap-1.5");
-      var stageBadge = el("span", "font-mono text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300", q.stage);
-      var typeBadge = el("span", "font-mono text-[10px] px-2 py-0.5 rounded bg-purple-500/15 text-purple-300", q.type);
-      badgeWrap.appendChild(stageBadge);
-      badgeWrap.appendChild(typeBadge);
-
-      top.appendChild(idSpan);
-      top.appendChild(badgeWrap);
-
-      var promptP = el("p", "text-xs text-slate-400 mb-2 leading-snug", q.prompt);
-
-      var choiceRow = el("div", "flex items-center justify-between font-mono text-xs mb-2");
-      var selectedText = el("span", "text-slate-200 font-bold", "Choice: " + q.selected_choice + " (" + (q.top_probability * 100).toFixed(1) + "%)");
-      var confText = el(
-        "span",
-        q.auto_executable ? "text-emerald-400" : "text-amber-400",
-        "conf=" + q.confidence.toFixed(2) + " | rel=" + q.relevance.toFixed(2)
-      );
-      choiceRow.appendChild(selectedText);
-      choiceRow.appendChild(confText);
-
-      var barWrap = el("div", "w-full h-1.5 bg-slate-900 rounded-full overflow-hidden mb-1.5");
-      var barFill = el(
-        "div",
-        q.auto_executable ? "h-full bg-gradient-to-r from-sky-400 to-emerald-400" : "h-full bg-amber-400"
-      );
-      barFill.style.width = Math.max(4, Math.min(100, Math.round(q.top_probability * 100))) + "%";
-      barWrap.appendChild(barFill);
-
-      var reasonText = el("div", "font-mono text-[10px] text-slate-500", q.route_reason);
-
-      card.appendChild(top);
-      card.appendChild(promptP);
-      card.appendChild(choiceRow);
-      card.appendChild(barWrap);
-      card.appendChild(reasonText);
-
-      cards.push(card);
+      var prompt = el("div");
+      prompt.appendChild(el("div", null, q.id));
+      prompt.appendChild(el("div", "q-prompt", q.prompt));
+      rows.push([
+        prompt,
+        q.stage,
+        q.selected_choice,
+        (q.top_probability * 100).toFixed(0) + "%",
+        q.route_reason.replace("Gate: ", "")
+      ]);
     }
+    renderTable(matrix, ["Question", "Stage", "Answer", "P", "Gate"], rows);
+  }
 
-    matrix.replaceChildren.apply(matrix, cards);
+  function renderHistory(rows) {
+    var list = $("history-list");
+    if (!list) return;
+    if (!rows || !rows.length) {
+      list.replaceChildren(el("p", "note", "No runs yet."));
+      return;
+    }
+    var body = [];
+    for (var i = 0; i < rows.length; i++) {
+      var h = rows[i];
+      body.push([h.timestamp, h.final_route_tier, h.latency_ms.toFixed(0) + " ms"]);
+    }
+    renderTable(list, ["Time", "Route", "ms"], body);
+  }
+
+  function tierClass(tier) {
+    if (tier === "TIER_0_BLOCK") return "stamp tier-block";
+    if (tier === "TIER_0_AUTO_EXEC") return "stamp tier-auto";
+    if (tier && tier.indexOf("TIER_2") === 0) return "stamp tier-repair";
+    return "stamp tier-fastpath";
   }
 
   function updateDashboard(res) {
     if (!res) return;
-
-    updateModePill(res.mode, res.mode === "LIVE_TYPESAFE_API");
-
-    var kpiLat = document.getElementById("kpi-latency");
-    if (kpiLat && res.cascade) kpiLat.textContent = res.cascade.aegis_control_latency_ms.toFixed(0) + " ms";
-
-    var kpiCost = document.getElementById("kpi-jev-cost");
-    if (kpiCost && res.cascade) kpiCost.textContent = "$" + res.cascade.aegis_control_cost_usd.toFixed(6);
-
-    var kpiSavings = document.getElementById("kpi-savings-pct");
-    if (kpiSavings && res.cascade) kpiSavings.textContent = res.cascade.cost_savings_percent.toFixed(1) + "%";
-
-    var kpiSavingsSub = document.getElementById("kpi-savings-sub");
-    if (kpiSavingsSub && res.cascade) {
-      kpiSavingsSub.textContent = "vs $" + res.cascade.naive_frontier_cost_usd.toFixed(6) + " Naive Frontier";
-    }
-
-    var kpiComp = document.getElementById("kpi-composite");
-    if (kpiComp) kpiComp.textContent = res.composite_score.toFixed(1) + " / 100";
-
-    var kpiRoute = document.getElementById("kpi-route-tier");
-    if (kpiRoute) kpiRoute.textContent = res.final_route_tier;
-
-    if (res.flywheel) {
-      var kpiFly = document.getElementById("kpi-flywheel");
-      if (kpiFly) kpiFly.textContent = res.flywheel.distilled_golden_examples + " Distilled";
-      var kpiFlySub = document.getElementById("kpi-flywheel-sub");
-      if (kpiFlySub) {
-        kpiFlySub.textContent = res.flywheel.tier0_blocked_or_auto + " Blocked/Auto \u2022 " + res.flywheel.tier2_surgical_escalations + " Surgical Repairs";
-      }
-    }
-
-    var tierTitle = document.getElementById("decision-tier-title");
-    if (tierTitle) tierTitle.textContent = res.final_route_tier;
-
-    var tierBadge = document.getElementById("decision-badge");
-    if (tierBadge) {
-      tierBadge.textContent = res.final_route_tier;
-      if (res.final_route_tier === "TIER_0_BLOCK") {
-        tierBadge.className = "tier-pill tier-block font-mono text-xs font-bold px-3 py-1.5 rounded-lg";
-      } else if (res.final_route_tier.indexOf("TIER_2") === 0) {
-        tierBadge.className = "tier-pill tier-repair font-mono text-xs font-bold px-3 py-1.5 rounded-lg";
-      } else {
-        tierBadge.className = "tier-pill tier-fastpath font-mono text-xs font-bold px-3 py-1.5 rounded-lg";
-      }
-    }
-
-    var rationale = document.getElementById("decision-rationale");
-    if (rationale) rationale.textContent = res.final_decision;
-
+    updateModePill(res.mode, res.mode === "LIVE_TYPESAFE_API", res.fallback_used);
     if (res.cascade) {
-      var nc = document.getElementById("arch-naive-cost");
-      var nl = document.getElementById("arch-naive-lat");
-      var lc = document.getElementById("arch-legacy-cost");
-      var ll = document.getElementById("arch-legacy-lat");
-      var ac = document.getElementById("arch-aegis-cost");
-      var al = document.getElementById("arch-aegis-lat");
-      if (nc) nc.textContent = "$" + res.cascade.naive_frontier_cost_usd.toFixed(6);
-      if (nl) nl.textContent = res.cascade.naive_frontier_latency_ms.toFixed(0) + " ms";
-      if (lc) lc.textContent = "$" + res.cascade.legacy_router_cost_usd.toFixed(6);
-      if (ll) ll.textContent = res.cascade.legacy_router_latency_ms.toFixed(0) + " ms";
-      if (ac) ac.textContent = "$" + res.cascade.aegis_blended_cost_usd.toFixed(6);
-      if (al) al.textContent = res.cascade.aegis_total_latency_ms.toFixed(0) + " ms";
+      $("kpi-latency").textContent = res.latency_ms.toFixed(0) + " ms";
+      $("kpi-latency-sub").textContent = "Jev P50 " + res.cascade.reference_jev_p50_ms.toFixed(0) + " ms";
+      $("kpi-jev-cost").textContent = "$" + res.cascade.aegis_control_cost_usd.toFixed(6);
+      $("kpi-savings-pct").textContent = res.cascade.cost_savings_percent.toFixed(1) + "%";
+      $("kpi-savings-sub").textContent = "baseline $" + res.cascade.naive_frontier_cost_usd.toFixed(5);
+      $("arch-naive-cost").textContent = "$" + res.cascade.naive_frontier_cost_usd.toFixed(6);
+      $("arch-naive-lat").textContent = res.cascade.naive_frontier_latency_ms.toFixed(0) + " ms";
+      $("arch-legacy-cost").textContent = "$" + res.cascade.legacy_router_cost_usd.toFixed(6);
+      $("arch-legacy-lat").textContent = res.cascade.legacy_router_latency_ms.toFixed(0) + " ms";
+      $("arch-aegis-cost").textContent = "$" + res.cascade.aegis_blended_cost_usd.toFixed(6);
+      $("arch-aegis-lat").textContent = res.cascade.aegis_total_latency_ms.toFixed(0) + " ms";
     }
-
+    $("kpi-composite").textContent = res.composite_score.toFixed(1);
+    $("kpi-route-tier").textContent = res.final_route_tier;
+    if (res.flywheel) {
+      state.flywheel = res.flywheel;
+      $("kpi-flywheel").textContent = String(res.flywheel.distilled_golden_examples);
+      $("kpi-flywheel-sub").textContent = res.flywheel.guardrails_blocked + " block · " + res.flywheel.auto_executed + " auto";
+      $("recommended-line").textContent =
+        "τ  sec=" + res.flywheel.recommended_block_prob.toFixed(2) +
+        "  field=" + res.flywheel.recommended_verify_min.toFixed(2) +
+        "  route=" + res.flywheel.recommended_act_gate.toFixed(2) +
+        "  composite=" + res.flywheel.recommended_composite.toFixed(0) +
+        "  ECE=" + res.flywheel.expected_calibration_ece.toFixed(3);
+    }
+    $("decision-tier-title").textContent = res.final_route_tier;
+    var badge = $("decision-badge");
+    badge.textContent = res.final_route_tier;
+    badge.className = tierClass(res.final_route_tier);
+    $("decision-rationale").textContent = res.final_decision;
+    var failed = $("failed-fields-line");
+    if (res.failed_fields && res.failed_fields.length) {
+      failed.textContent = "Fields in repair: " + res.failed_fields.join(", ");
+    } else {
+      failed.textContent = res.selected_skill ? "Skill: " + res.selected_skill : "";
+    }
     renderFieldVerifications(res.field_verifications || []);
     renderQuestionsMatrix(res.questions || []);
+    renderHistory(res.history || []);
+    if (res.live_error) {
+      setStatus("Live API error, using simulator: " + res.live_error, true);
+    }
   }
 
-  function evaluateCurrent(scenarioIdOverride) {
-    var editor = document.getElementById("context-editor");
+  function readThresholds() {
+    return {
+      security_gate_confidence: parseFloat($("slider-security").value),
+      field_verify_confidence: parseFloat($("slider-field").value),
+      router_confidence: parseFloat($("slider-router").value),
+      composite_pass_threshold: parseFloat($("slider-composite").value)
+    };
+  }
+
+  function paintThresholdLabels(payload) {
+    $("val-security").textContent = payload.security_gate_confidence.toFixed(2);
+    $("val-field").textContent = payload.field_verify_confidence.toFixed(2);
+    $("val-router").textContent = payload.router_confidence.toFixed(2);
+    $("val-composite").textContent = payload.composite_pass_threshold.toFixed(0);
+  }
+
+  function evaluateCurrent() {
+    var editor = $("context-editor");
     var parsedContext = {};
     if (editor && editor.value.trim() !== "") {
       try {
         parsedContext = JSON.parse(editor.value);
       } catch (e) {
-        setStatus("Invalid JSON in Shared KV Context Payload: " + e.message, true);
+        setStatus("Invalid JSON: " + e.message, true);
         return;
       }
     }
-
-    setStatus("Executing 11-question parallel fan-out via typesafe-sdk-go...", false);
-
+    setStatus("Running 11-question fan-out…");
     fetch("/api/evaluate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        scenario_id: scenarioIdOverride || state.activeScenarioId,
+        scenario_id: state.activeScenarioId,
         context: parsedContext
       })
     })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        updateDashboard(data);
+      .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          setStatus(res.data.error || "Evaluation failed", true);
+          return;
+        }
+        updateDashboard(res.data);
         setStatus(
-          "Completed 11-Q Fan-Out in " + data.latency_ms.toFixed(1) + "ms | Route: " + data.final_route_tier + " | Savings: " + data.cascade.cost_savings_percent.toFixed(1) + "%",
-          false
+          "Route " + res.data.final_route_tier + " in " + res.data.latency_ms.toFixed(0) + " ms wall-clock · " +
+            res.data.questions.length + " questions · savings " + res.data.cascade.cost_savings_percent.toFixed(1) + "%"
         );
       })
       .catch(function (err) {
@@ -306,93 +256,80 @@
   }
 
   function syncThresholds() {
-    var sSec = document.getElementById("slider-security");
-    var sField = document.getElementById("slider-field");
-    var sRoute = document.getElementById("slider-router");
-    var sComp = document.getElementById("slider-composite");
-
-    var payload = {
-      security_gate_confidence: parseFloat(sSec.value),
-      field_verify_confidence: parseFloat(sField.value),
-      router_confidence: parseFloat(sRoute.value),
-      composite_pass_threshold: parseFloat(sComp.value)
-    };
-
-    document.getElementById("val-security").textContent = payload.security_gate_confidence.toFixed(2);
-    document.getElementById("val-field").textContent = payload.field_verify_confidence.toFixed(2);
-    document.getElementById("val-router").textContent = payload.router_confidence.toFixed(2);
-    document.getElementById("val-composite").textContent = payload.composite_pass_threshold.toFixed(1);
-
+    var payload = readThresholds();
+    paintThresholdLabels(payload);
     fetch("/api/thresholds", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
-    })
-      .then(function (r) { return r.json(); })
-      .then(function () {
-        evaluateCurrent(state.activeScenarioId);
-      });
+    }).then(function () {
+      evaluateCurrent();
+    });
   }
 
   function init() {
-    var sliders = ["slider-security", "slider-field", "slider-router", "slider-composite"];
-    for (var i = 0; i < sliders.length; i++) {
-      var s = document.getElementById(sliders[i]);
-      if (s) {
-        s.addEventListener("input", syncThresholds);
+    var bootNode = $("boot-data");
+    if (bootNode && bootNode.textContent) {
+      try {
+        var boot = JSON.parse(bootNode.textContent);
+        state.presets = boot.presets || [];
+        state.flywheel = boot.flywheel;
+        if (boot.eval && boot.eval.scenario_id) {
+          state.activeScenarioId = boot.eval.scenario_id;
+        }
+        renderScenarioButtons();
+        if (boot.eval) updateDashboard(boot.eval);
+        setStatus("Ready. Routing is computed from the payload, not from the scenario label.");
+      } catch (e) {
+        setStatus("Boot payload parse failed: " + e.message, true);
       }
     }
 
-    var runBtn = document.getElementById("run-eval-btn");
-    if (runBtn) {
-      runBtn.addEventListener("click", function () {
-        evaluateCurrent("");
+    ["slider-security", "slider-field", "slider-router", "slider-composite"].forEach(function (id) {
+      var s = $(id);
+      if (!s) return;
+      s.addEventListener("input", function () {
+        paintThresholdLabels(readThresholds());
+        clearTimeout(state.debounceTimer);
+        state.debounceTimer = setTimeout(syncThresholds, 220);
       });
-    }
+    });
 
-    var keyBtn = document.getElementById("save-key-btn");
-    if (keyBtn) {
-      keyBtn.addEventListener("click", function () {
-        var input = document.getElementById("api-key-input");
-        var keyVal = input ? input.value.trim() : "";
-        fetch("/api/key", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ api_key: keyVal })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (res) {
-            if (input) input.value = "";
-            updateModePill(res.mode, res.has_api_key);
-            setStatus(
-              res.has_api_key
-                ? "Configured live TYPESAFE_API_KEY in server memory. Re-evaluating..."
-                : "Cleared TYPESAFE_API_KEY; switched to Calibrated Jev-1.13 RLCD Engine.",
-              false
-            );
-            evaluateCurrent(state.activeScenarioId);
-          });
-      });
-    }
+    $("run-eval-btn").addEventListener("click", evaluateCurrent);
+    $("context-editor").addEventListener("keydown", function (ev) {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") {
+        ev.preventDefault();
+        evaluateCurrent();
+      }
+    });
 
-    fetch("/api/state")
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        state.presets = data.presets || [];
-        if (state.presets.length > 0) {
-          state.activeScenarioId = "rag_verified_fastpath";
-          for (var i = 0; i < state.presets.length; i++) {
-            if (state.presets[i].id === state.activeScenarioId) {
-              var editor = document.getElementById("context-editor");
-              if (editor) {
-                editor.value = JSON.stringify(state.presets[i].context, null, 2);
-              }
-            }
-          }
-        }
-        renderScenarioButtons();
-        evaluateCurrent(state.activeScenarioId);
-      });
+    $("apply-recommended").addEventListener("click", function () {
+      var f = state.flywheel;
+      if (!f) return;
+      $("slider-security").value = f.recommended_block_prob;
+      $("slider-field").value = f.recommended_verify_min;
+      $("slider-router").value = f.recommended_act_gate;
+      $("slider-composite").value = f.recommended_composite;
+      syncThresholds();
+    });
+
+    $("key-form").addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var input = $("api-key-input");
+      var keyVal = input ? input.value.trim() : "";
+      fetch("/api/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: keyVal })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (input) input.value = "";
+          updateModePill(res.mode, res.has_api_key, false);
+          setStatus(res.has_api_key ? "Live key stored in memory. Re-evaluating…" : "Key cleared. Simulator mode.");
+          evaluateCurrent();
+        });
+    });
   }
 
   if (document.readyState === "loading") {

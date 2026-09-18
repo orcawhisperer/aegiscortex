@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -12,41 +12,55 @@ import (
 	"github.com/orcawhisperer/typesafe-sdk-go"
 )
 
-// GateThresholds holds the live-tunable confidence and probability thresholds for AegisCortex.
+const (
+	typesafeInputUSDPerMTok = 0.042
+	modeledMiniUSD          = 0.00085
+	modeledFrontierUSD      = 0.02850
+	modeledUnroutedUSD      = 0.03840
+	modeledUnroutedLatency  = int64(11450)
+	referenceJevP50Ms       = int64(114)
+	historyLimit            = 24
+)
+
+// GateThresholds holds live-tunable confidence gates.
 type GateThresholds struct {
-	GuardrailBlockProb  float64 `json:"guardrail_block_prob"`  // Default: 0.65 (block if any hazard noul >= this)
-	ChoiceActConfidence float64 `json:"choice_act_confidence"` // Default: 0.80 (act automatically if choice confidence >= this)
-	ReviewMinConfidence float64 `json:"review_min_confidence"` // Default: 0.50 (route to Tier 2 / human review if below ChoiceActConfidence)
-	CascadeVerifyMin    float64 `json:"cascade_verify_min"`    // Default: 0.75 (require verbatim extraction & citation support >= this)
+	GuardrailBlockProb  float64 `json:"guardrail_block_prob"`
+	ChoiceActConfidence float64 `json:"choice_act_confidence"`
+	ReviewMinConfidence float64 `json:"review_min_confidence"`
+	CascadeVerifyMin    float64 `json:"cascade_verify_min"`
+	CompositePassScore  float64 `json:"composite_pass_score"`
 }
 
-// DefaultGateThresholds returns the calibrated default thresholds.
+// DefaultGateThresholds returns the calibrated defaults.
 func DefaultGateThresholds() GateThresholds {
 	return GateThresholds{
 		GuardrailBlockProb:  0.65,
 		ChoiceActConfidence: 0.80,
 		ReviewMinConfidence: 0.50,
 		CascadeVerifyMin:    0.75,
+		CompositePassScore:  68.0,
 	}
 }
 
-// QuestionEvaluationItem represents one atomic decision in the 11-question speculative fan-out matrix.
+// QuestionEvaluationItem is one atomic decision in the fan-out matrix.
 type QuestionEvaluationItem struct {
 	Key           string             `json:"key"`
 	Primitive     string             `json:"primitive"`
 	Category      string             `json:"category"`
 	Instructions  string             `json:"instructions"`
+	FieldName     string             `json:"field_name,omitempty"`
 	SelectedLabel string             `json:"selected_label,omitempty"`
-	NumericValue  float64            `json:"numeric_value"` // Noul probability or normalized Score or top Choice prob
+	NumericValue  float64            `json:"numeric_value"`
 	RawScore      float64            `json:"raw_score,omitempty"`
 	Confidence    float64            `json:"confidence"`
 	Probabilities map[string]float64 `json:"probabilities,omitempty"`
-	GateAction    string             `json:"gate_action"` // "act", "review", "block", "pass"
+	GateAction    string             `json:"gate_action"`
 }
 
-// CascadeComparison shows the exact unit economics of running AegisCortex vs. unrouted LLMs.
+// CascadeComparison is modeled unit economics versus unrouted frontier+judge.
 type CascadeComparison struct {
-	TypeSafeLatencyMs       int64   `json:"typesafe_latency_ms"`
+	WallClockLatencyMs      int64   `json:"wall_clock_latency_ms"`
+	ReferenceJevP50Ms       int64   `json:"reference_jev_p50_ms"`
 	TypeSafeCostUSD         float64 `json:"typesafe_cost_usd"`
 	ExecutedTier            string  `json:"executed_tier"`
 	ExecutedTotalCostUSD    float64 `json:"executed_total_cost_usd"`
@@ -54,18 +68,23 @@ type CascadeComparison struct {
 	UnroutedLatencyMs       int64   `json:"unrouted_latency_ms"`
 	CostSavingsPercent      float64 `json:"cost_savings_percent"`
 	SpeedupMultiplier       float64 `json:"speedup_multiplier"`
+	LegacyRouterCostUSD     float64 `json:"legacy_router_cost_usd"`
+	LegacyRouterLatencyMs   int64   `json:"legacy_router_latency_ms"`
 }
 
-// EvaluationOutcome is the full result of a single AegisCortex speculative fan-out evaluation.
+// EvaluationOutcome is the full result of one fan-out evaluation.
 type EvaluationOutcome struct {
 	Timestamp          string                   `json:"timestamp"`
-	Mode               string                   `json:"mode"` // "live_api" or "calibrated_rlcd_sim"
+	Mode               string                   `json:"mode"`
+	FallbackUsed       bool                     `json:"fallback_used"`
+	LiveError          string                   `json:"live_error,omitempty"`
 	Model              string                   `json:"model"`
 	RequestID          string                   `json:"request_id"`
 	Pipeline           PipelineID               `json:"pipeline"`
-	FinalVerdict       string                   `json:"final_verdict"` // "BLOCK_GUARDRAIL", "AUTO_EXECUTE_TIER0", "VERIFIED_FASTPATH_TIER1", "ESCALATE_REASONING_TIER2"
+	FinalVerdict       string                   `json:"final_verdict"`
 	VerdictSummary     string                   `json:"verdict_summary"`
 	SelectedSkill      string                   `json:"selected_skill"`
+	FailedFields       []string                 `json:"failed_fields"`
 	CompositeRiskScore float64                  `json:"composite_risk_score"`
 	CompositeTrust     float64                  `json:"composite_trust"`
 	Items              []QuestionEvaluationItem `json:"items"`
@@ -74,22 +93,27 @@ type EvaluationOutcome struct {
 	OutputTokens       int                      `json:"output_tokens"`
 }
 
-// FlywheelMetrics tracks cumulative telemetry and self-evolving calibration guidance across all runs.
+// FlywheelMetrics is cumulative telemetry plus recommended gates.
 type FlywheelMetrics struct {
 	TotalRequests          int     `json:"total_requests"`
 	TotalAtomicQuestions   int     `json:"total_atomic_questions"`
 	GuardrailsBlocked      int     `json:"guardrails_blocked"`
 	HallucinationsCaught   int     `json:"hallucinations_caught"`
 	FastPathApproved       int     `json:"fast_path_approved"`
+	AutoExecuted           int     `json:"auto_executed"`
 	ReasoningEscalations   int     `json:"reasoning_escalations"`
 	TotalAegisCostUSD      float64 `json:"total_aegis_cost_usd"`
 	TotalBaselineCostUSD   float64 `json:"total_baseline_cost_usd"`
 	ExpectedCalibrationECE float64 `json:"expected_calibration_ece"`
 	RecommendedActGate     float64 `json:"recommended_act_gate"`
 	RecommendedBlockProb   float64 `json:"recommended_block_prob"`
+	RecommendedVerifyMin   float64 `json:"recommended_verify_min"`
+	RecommendedComposite   float64 `json:"recommended_composite"`
+	sumAbsError            float64
+	noulObservations       int
 }
 
-// CortexEngine manages the TypeSafe Go SDK client, in-memory API key, thresholds, and flywheel telemetry.
+// CortexEngine owns the TypeSafe client config, thresholds, history, and flywheel.
 type CortexEngine struct {
 	mu         sync.RWMutex
 	apiKey     string
@@ -99,14 +123,14 @@ type CortexEngine struct {
 	metrics    FlywheelMetrics
 }
 
-// NewCortexEngine initializes the AegisCortex engine, picking up TYPESAFE_API_KEY if set in the environment.
+// NewCortexEngine initializes the engine from TYPESAFE_API_KEY / TYPESAFE_BASE_URL.
 func NewCortexEngine() *CortexEngine {
 	envKey := strings.TrimSpace(os.Getenv(typesafe.APIKeyEnv))
 	envURL := strings.TrimSpace(os.Getenv(typesafe.BaseURLEnv))
 	if envURL == "" {
 		envURL = typesafe.DefaultBaseURL
 	}
-	e := &CortexEngine{
+	return &CortexEngine{
 		apiKey:     envKey,
 		baseURL:    envURL,
 		thresholds: DefaultGateThresholds(),
@@ -114,30 +138,27 @@ func NewCortexEngine() *CortexEngine {
 			ExpectedCalibrationECE: 0.018,
 			RecommendedActGate:     0.80,
 			RecommendedBlockProb:   0.65,
+			RecommendedVerifyMin:   0.75,
+			RecommendedComposite:   68.0,
 		},
 	}
-	// Seed initial benchmark runs so the dashboard telemetry and flywheel are rich on startup
-	for _, preset := range DefaultPresets() {
-		_, _ = e.Evaluate(context.Background(), preset.Pipeline, preset.State, false)
-	}
-	return e
 }
 
-// SetAPIKey updates the in-memory TypeSafe API key (never written to disk or browser storage).
+// SetAPIKey updates the in-memory TypeSafe API key (never written to disk).
 func (e *CortexEngine) SetAPIKey(key string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.apiKey = strings.TrimSpace(key)
 }
 
-// HasLiveKey reports whether a non-empty TYPESAFE_API_KEY is currently configured in memory.
+// HasLiveKey reports whether a non-empty API key is configured in memory.
 func (e *CortexEngine) HasLiveKey() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.apiKey != ""
 }
 
-// UpdateThresholds updates the confidence and probability gates and re-evaluates flywheel recommendations.
+// UpdateThresholds updates gates, ignoring out-of-range values.
 func (e *CortexEngine) UpdateThresholds(t GateThresholds) GateThresholds {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -153,26 +174,34 @@ func (e *CortexEngine) UpdateThresholds(t GateThresholds) GateThresholds {
 	if t.CascadeVerifyMin > 0 && t.CascadeVerifyMin <= 1 {
 		e.thresholds.CascadeVerifyMin = t.CascadeVerifyMin
 	}
+	if t.CompositePassScore >= 0 && t.CompositePassScore <= 100 {
+		e.thresholds.CompositePassScore = t.CompositePassScore
+	}
 	return e.thresholds
 }
 
-// Snapshot returns the current engine status, thresholds, history, and flywheel metrics.
-func (e *CortexEngine) Snapshot() map[string]any {
+func (e *CortexEngine) snapshotThresholds() GateThresholds {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return map[string]any{
-		"has_live_key": e.apiKey != "",
-		"sdk_version":  typesafe.Version,
-		"thresholds":   e.thresholds,
-		"metrics":      e.metrics,
-		"history":      e.history,
-		"presets":      DefaultPresets(),
-	}
+	return e.thresholds
 }
 
-// Evaluate runs the 11-question Speculative Fan-Out Matrix over state using typesafe-sdk-go.
-// If a live API key is present and preferLive is true, it calls `client.SystemOne(ctx, req)` against TypeSafe AI.
-// If no key is present (or if the live call fails/is in simulation mode), it runs the deterministic Calibrated RLCD Engine.
+func (e *CortexEngine) snapshotHistory() []EvaluationOutcome {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]EvaluationOutcome, len(e.history))
+	copy(out, e.history)
+	return out
+}
+
+func (e *CortexEngine) snapshotMetrics() FlywheelMetrics {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.metrics
+}
+
+// Evaluate runs the 11-question fan-out. Live API is used when a key is present;
+// failures are recorded and the calibrated simulator is used instead.
 func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state any, preferLive bool) (*EvaluationOutcome, error) {
 	e.mu.RLock()
 	apiKey := e.apiKey
@@ -185,20 +214,30 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 
 	var sdkResp *typesafe.SystemOneResponse
 	mode := "calibrated_rlcd_sim"
+	fallback := false
+	liveErr := ""
 
 	if preferLive && apiKey != "" {
 		client, err := typesafe.NewClient(
 			typesafe.WithAPIKey(apiKey),
 			typesafe.WithBaseURL(baseURL),
-			typesafe.WithTimeout(10*time.Second),
+			typesafe.WithTimeout(20*time.Second),
+			typesafe.WithDefaultModel(typesafe.ModelJev1_13_0),
 		)
-		if err == nil {
+		if err != nil {
+			fallback = true
+			liveErr = sanitizeLiveError(err)
+		} else {
 			defer client.Close()
 			liveResp, callErr := client.SystemOne(ctx, typesafe.SystemOneRequest{
 				State:     state,
 				Questions: questions,
+				Model:     typesafe.ModelJev1_13_0,
 			})
-			if callErr == nil {
+			if callErr != nil {
+				fallback = true
+				liveErr = sanitizeLiveError(callErr)
+			} else {
 				sdkResp = liveResp
 				mode = "live_api"
 			}
@@ -210,32 +249,100 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 	}
 
 	elapsedMs := time.Since(start).Milliseconds()
-	if mode == "calibrated_rlcd_sim" && elapsedMs < 95 {
-		elapsedMs = 112 // Representative Jev-1.13 P50 round-trip latency (114ms in official benchmark)
+	if elapsedMs < 1 {
+		elapsedMs = 1
 	}
 
-	// Use typesafe-sdk-go's built-in Composite Scoring & Confidence-Gated Routing helpers!
-	riskComp, _ := typesafe.ComputeCompositeScore(sdkResp, []typesafe.ScoreDimension{
-		{Name: "jailbreak_attempt", Weight: 0.35},
-		{Name: "indirect_prompt_injection", Weight: 0.35},
-		{Name: "credential_or_pii_exposure", Weight: 0.15},
-		{Name: "policy_harm_severity", Weight: 0.15, MaxScore: 2.0},
+	items, failedFields, guardrailTriggered := buildItems(sdkResp, specs, thresh)
+
+	riskComp, riskErr := typesafe.ComputeCompositeScore(sdkResp, []typesafe.ScoreDimension{
+		{Name: qJailbreak, Weight: 0.35},
+		{Name: qRAGInjection, Weight: 0.35},
+		{Name: qCredentialPII, Weight: 0.15},
+		{Name: qHarmSeverity, Weight: 0.15, MaxScore: 2.0},
 	})
-	trustComp, _ := typesafe.ComputeCompositeScore(sdkResp, []typesafe.ScoreDimension{
-		{Name: "extraction_verbatim_match", Weight: 0.50},
-		{Name: "answers_user_intent", Weight: 0.50},
+	trustComp, trustErr := typesafe.ComputeCompositeScore(sdkResp, []typesafe.ScoreDimension{
+		{Name: qFieldVendor, Weight: 0.25},
+		{Name: qFieldAmount, Weight: 0.25},
+		{Name: qFieldDate, Weight: 0.25},
+		{Name: qFieldClaim, Weight: 0.25},
 	})
 
 	compositeRisk := 0.0
-	if riskComp != nil {
+	if riskErr == nil && riskComp != nil {
 		compositeRisk = riskComp.WeightedScore
 	}
 	compositeTrust := 0.0
-	if trustComp != nil {
+	if trustErr == nil && trustComp != nil {
 		compositeTrust = trustComp.WeightedScore
 	}
 
+	citationChoice := sdkResp.Choices[qCitation]
+	execTierChoice := sdkResp.Choices[qExecTier]
+	skillChoice := sdkResp.Choices[qAgentSkill]
+
+	inTokens := sdkResp.Usage.InputTokensValue()
+	if inTokens <= 0 {
+		inTokens = 980
+	}
+	tsCost := (float64(inTokens) / 1_000_000.0) * typesafeInputUSDPerMTok
+
+	verdict, summary, executedTier, executedTotalCost := decideRoute(
+		thresh,
+		guardrailTriggered,
+		compositeRisk,
+		compositeTrust,
+		failedFields,
+		citationChoice,
+		execTierChoice,
+		skillChoice,
+		tsCost,
+	)
+
+	savingsPct := ((modeledUnroutedUSD - executedTotalCost) / modeledUnroutedUSD) * 100.0
+	if savingsPct < 0 {
+		savingsPct = 0
+	}
+
+	outcome := EvaluationOutcome{
+		Timestamp:          time.Now().UTC().Format("15:04:05.000"),
+		Mode:               mode,
+		FallbackUsed:       fallback,
+		LiveError:          liveErr,
+		Model:              sdkResp.Model,
+		RequestID:          sdkResp.RequestID,
+		Pipeline:           pipeline,
+		FinalVerdict:       verdict,
+		VerdictSummary:     summary,
+		SelectedSkill:      skillChoice.Choice,
+		FailedFields:       failedFields,
+		CompositeRiskScore: round3(compositeRisk),
+		CompositeTrust:     round3(compositeTrust),
+		Items:              items,
+		InputTokens:        inTokens,
+		OutputTokens:       sdkResp.Usage.OutputTokensValue(),
+		Economics: CascadeComparison{
+			WallClockLatencyMs:      elapsedMs,
+			ReferenceJevP50Ms:       referenceJevP50Ms,
+			TypeSafeCostUSD:         tsCost,
+			ExecutedTier:            executedTier,
+			ExecutedTotalCostUSD:    executedTotalCost,
+			UnroutedFrontierCostUSD: modeledUnroutedUSD,
+			UnroutedLatencyMs:       modeledUnroutedLatency,
+			CostSavingsPercent:      round3(savingsPct),
+			SpeedupMultiplier:       round3(float64(modeledUnroutedLatency) / float64(maxInt64(referenceJevP50Ms, 1))),
+			LegacyRouterCostUSD:     0.0042,
+			LegacyRouterLatencyMs:   620,
+		},
+	}
+
+	e.recordOutcome(outcome, sdkResp)
+	return &outcome, nil
+}
+
+func buildItems(sdkResp *typesafe.SystemOneResponse, specs []BoundQuestionSpec, thresh GateThresholds) ([]QuestionEvaluationItem, []string, bool) {
 	items := make([]QuestionEvaluationItem, 0, len(specs))
+	failedFields := make([]string, 0, 4)
 	guardrailTriggered := false
 
 	for _, spec := range specs {
@@ -244,13 +351,14 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 			Primitive:    spec.Primitive,
 			Category:     spec.Category,
 			Instructions: spec.Instructions,
+			FieldName:    spec.FieldName,
 		}
 		switch spec.Primitive {
 		case "noul":
 			nAns := sdkResp.Nouls[spec.Key]
 			item.NumericValue = round3(nAns.Noul)
 			item.Confidence = round3(math.Abs(nAns.Noul-0.5) * 2.0)
-			if spec.Category == "Guardrail" {
+			if isGuardrailNoul(spec.Key) {
 				if nAns.Noul >= thresh.GuardrailBlockProb {
 					item.GateAction = "block"
 					guardrailTriggered = true
@@ -259,11 +367,21 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 				} else {
 					item.GateAction = "pass"
 				}
+			} else if isFieldQuestion(spec.Key) {
+				if nAns.Noul >= thresh.CascadeVerifyMin {
+					item.GateAction = "pass"
+				} else {
+					item.GateAction = "review"
+					name := spec.FieldName
+					if name == "" {
+						name = spec.Key
+					}
+					failedFields = append(failedFields, name)
+				}
 			} else {
 				dec := typesafe.RouteNoul(nAns, thresh.CascadeVerifyMin, 0.30)
 				item.GateAction = string(dec.Action)
 			}
-
 		case "choice":
 			cAns := sdkResp.Choices[spec.Key]
 			item.SelectedLabel = cAns.Choice
@@ -272,7 +390,6 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 			item.Probabilities = cAns.Probabilities
 			dec := typesafe.RouteChoice(cAns, thresh.ChoiceActConfidence, thresh.ReviewMinConfidence)
 			item.GateAction = string(dec.Action)
-
 		case "score":
 			sAns := sdkResp.Scores[spec.Key]
 			item.RawScore = round3(sAns.Score)
@@ -284,92 +401,76 @@ func (e *CortexEngine) Evaluate(ctx context.Context, pipeline PipelineID, state 
 		}
 		items = append(items, item)
 	}
+	return items, failedFields, guardrailTriggered
+}
 
-	// Determine final cascade verdict using confidence-gated routing
-	citationChoice := sdkResp.Choices["citation_grounding"]
-	execTierChoice := sdkResp.Choices["execution_tier"]
-	skillChoice := sdkResp.Choices["selected_agent_skill"]
-	verbatimNoul := sdkResp.Nouls["extraction_verbatim_match"].Noul
-
-	var verdict, summary, executedTier string
-	var executedTotalCost float64
-
-	// TypeSafe Jev cost: $0.042 per 1M input tokens, $0.00 per output token!
-	inTokens := sdkResp.Usage.InputTokensValue()
-	if inTokens <= 0 {
-		inTokens = 980
-	}
-	tsCost := (float64(inTokens) / 1_000_000.0) * 0.042
+func decideRoute(
+	thresh GateThresholds,
+	guardrailTriggered bool,
+	compositeRisk float64,
+	compositeTrust float64,
+	failedFields []string,
+	citation typesafe.ChoiceResponse[string],
+	execTier typesafe.ChoiceResponse[string],
+	skill typesafe.ChoiceResponse[string],
+	tsCost float64,
+) (verdict, summary, executedTier string, executedTotalCost float64) {
+	trustScore := compositeTrust * 100.0
 
 	switch {
 	case guardrailTriggered || compositeRisk >= thresh.GuardrailBlockProb:
 		verdict = "BLOCK_GUARDRAIL"
-		executedTier = "Tier 0: Deterministic Firewall Block"
-		executedTotalCost = tsCost // Zero downstream LLM tokens spent!
-		summary = "Blocked in 112ms by Jev Guardrail Nouls (Prompt Injection / Policy Hazard >= threshold). $0.00 spent on downstream LLMs."
-
-	case citationChoice.Choice == "contradicted" || citationChoice.Choice == "extrapolated" || verbatimNoul < thresh.CascadeVerifyMin:
-		verdict = "ESCALATE_REASONING_TIER2"
-		executedTier = "Tier 2: SDE Cascade Escalation (GPT-5.5 / Opus Reasoning)"
-		executedTotalCost = tsCost + 0.00085 + 0.02850
-		summary = "Jev Per-Field Verifier caught an ungrounded extraction/citation (P(verbatim)=" + formatFloat(verbatimNoul) + ", citation=" + citationChoice.Choice + "). Escalated from Mini to Frontier Reasoning before returning to user."
-
-	case execTierChoice.Choice == "tier0_deterministic" && execTierChoice.Confidence >= thresh.ChoiceActConfidence:
-		verdict = "AUTO_EXECUTE_TIER0"
-		executedTier = "Tier 0: Autonomous Deterministic Skill (" + skillChoice.Choice + ")"
+		executedTier = "Tier 0: Deterministic firewall block"
 		executedTotalCost = tsCost
-		summary = "High-confidence policy & state match (Confidence=" + formatFloat(execTierChoice.Confidence) + "). Executed deterministic workflow (`" + skillChoice.Choice + "`) with zero LLM generation cost."
+		summary = fmt.Sprintf(
+			"Blocked before generation. Guardrail noul or composite risk (%.2f) met τ_sec=%.2f. Modeled downstream LLM cost is $0.00.",
+			compositeRisk, thresh.GuardrailBlockProb,
+		)
 
-	case execTierChoice.Confidence < thresh.ChoiceActConfidence:
+	case len(failedFields) > 0 || citation.Choice == "contradicted" || citation.Choice == "extrapolated":
 		verdict = "ESCALATE_REASONING_TIER2"
-		executedTier = "Tier 2: Uncertainty-Gated Escalation"
-		executedTotalCost = tsCost + 0.02850
-		summary = "Model confidence (" + formatFloat(execTierChoice.Confidence) + ") is below the automatic action gate (" + formatFloat(thresh.ChoiceActConfidence) + "). Safely routed to Tier-2 review."
+		executedTier = "Tier 2: Surgical field repair / frontier reasoning"
+		executedTotalCost = tsCost + modeledMiniUSD + modeledFrontierUSD
+		fieldNote := "citation=" + citation.Choice
+		if len(failedFields) > 0 {
+			fieldNote = "failed fields: " + strings.Join(failedFields, ", ")
+		}
+		summary = fmt.Sprintf(
+			"Per-field verifier refused to lock every extraction (%s). Escalating only the uncertain work to frontier reasoning. Trust=%.1f/100.",
+			fieldNote, trustScore,
+		)
+
+	case trustScore < thresh.CompositePassScore:
+		verdict = "ESCALATE_REASONING_TIER2"
+		executedTier = "Tier 2: Uncertainty-gated escalation"
+		executedTotalCost = tsCost + modeledFrontierUSD
+		summary = fmt.Sprintf(
+			"Composite quality (%.1f/100) is below the pass gate (%.0f). Routing to Tier-2 review.",
+			trustScore, thresh.CompositePassScore,
+		)
+
+	case execTier.Choice == "tier0_deterministic" && execTier.Confidence >= thresh.ChoiceActConfidence && skill.Choice != "none_needed" && skill.Choice != "incident_pager_alert":
+		verdict = "AUTO_EXECUTE_TIER0"
+		executedTier = "Tier 0: Autonomous deterministic skill (" + skill.Choice + ")"
+		executedTotalCost = tsCost
+		summary = fmt.Sprintf(
+			"High-confidence policy match (execution_tier conf=%.2f ≥ τ_route=%.2f). Modeled action: `%s` with $0.00 generation cost. No webhook is fired from this studio.",
+			execTier.Confidence, thresh.ChoiceActConfidence, skill.Choice,
+		)
 
 	default:
 		verdict = "VERIFIED_FASTPATH_TIER1"
-		executedTier = "Tier 1: Fast Mini + Jev 11-Question Verification"
-		executedTotalCost = tsCost + 0.00085
-		summary = "All 11 atomic checks passed (Citation: verbatim_supported, Trust=" + formatFloat(compositeTrust) + "). Served fast-path Mini response without Frontier Reasoning overhead."
+		executedTier = "Tier 1: Fast mini + verified fan-out"
+		executedTotalCost = tsCost + modeledMiniUSD
+		summary = fmt.Sprintf(
+			"All field nouls locked at τ_field=%.2f and citation is %s (trust=%.1f/100 ≥ %.0f). Serve the mini draft; skip frontier reasoning.",
+			thresh.CascadeVerifyMin, citation.Choice, trustScore, thresh.CompositePassScore,
+		)
 	}
-
-	baselineFrontierCost := 0.03840 // Baseline cost of running Frontier Reasoning + LLM-as-a-judge on every turn
-	savingsPct := ((baselineFrontierCost - executedTotalCost) / baselineFrontierCost) * 100.0
-	if savingsPct < 0 {
-		savingsPct = 0
-	}
-
-	outcome := EvaluationOutcome{
-		Timestamp:          time.Now().Format("15:04:05.000"),
-		Mode:               mode,
-		Model:              sdkResp.Model,
-		RequestID:          sdkResp.RequestID,
-		Pipeline:           pipeline,
-		FinalVerdict:       verdict,
-		VerdictSummary:     summary,
-		SelectedSkill:      skillChoice.Choice,
-		CompositeRiskScore: round3(compositeRisk),
-		CompositeTrust:     round3(compositeTrust),
-		Items:              items,
-		InputTokens:        inTokens,
-		OutputTokens:       sdkResp.Usage.OutputTokensValue(),
-		Economics: CascadeComparison{
-			TypeSafeLatencyMs:       elapsedMs,
-			TypeSafeCostUSD:         tsCost,
-			ExecutedTier:            executedTier,
-			ExecutedTotalCostUSD:    executedTotalCost,
-			UnroutedFrontierCostUSD: baselineFrontierCost,
-			UnroutedLatencyMs:       11450,
-			CostSavingsPercent:      round3(savingsPct),
-			SpeedupMultiplier:       round3(11450.0 / float64(maxInt64(elapsedMs, 1))),
-		},
-	}
-
-	e.recordOutcome(outcome)
-	return &outcome, nil
+	return verdict, summary, executedTier, executedTotalCost
 }
 
-func (e *CortexEngine) recordOutcome(o EvaluationOutcome) {
+func (e *CortexEngine) recordOutcome(o EvaluationOutcome, resp *typesafe.SystemOneResponse) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.metrics.TotalRequests++
@@ -380,133 +481,69 @@ func (e *CortexEngine) recordOutcome(o EvaluationOutcome) {
 	switch o.FinalVerdict {
 	case "BLOCK_GUARDRAIL":
 		e.metrics.GuardrailsBlocked++
-	case "AUTO_EXECUTE_TIER0", "VERIFIED_FASTPATH_TIER1":
+	case "AUTO_EXECUTE_TIER0":
+		e.metrics.AutoExecuted++
+		e.metrics.FastPathApproved++
+	case "VERIFIED_FASTPATH_TIER1":
 		e.metrics.FastPathApproved++
 	case "ESCALATE_REASONING_TIER2":
 		e.metrics.ReasoningEscalations++
-		if o.CompositeTrust < 0.75 {
+		if len(o.FailedFields) > 0 || o.CompositeTrust < 0.75 {
 			e.metrics.HallucinationsCaught++
 		}
 	}
 
-	// Prepend to history (keep latest 20)
+	if resp != nil {
+		for _, noul := range resp.Nouls {
+			label := 0.0
+			if noul.Noul >= 0.5 {
+				label = 1
+			}
+			e.metrics.sumAbsError += math.Abs(noul.Noul - label)
+			e.metrics.noulObservations++
+		}
+		if e.metrics.noulObservations > 0 {
+			e.metrics.ExpectedCalibrationECE = round3(e.metrics.sumAbsError / float64(e.metrics.noulObservations) / 2.0)
+		}
+	}
+
+	// Recommend slightly conservative gates from observed traffic.
+	if e.metrics.GuardrailsBlocked > 0 {
+		e.metrics.RecommendedBlockProb = round3(clamp(e.thresholds.GuardrailBlockProb*0.98+0.02, 0.50, 0.92))
+	}
+	if e.metrics.FastPathApproved > 0 {
+		e.metrics.RecommendedActGate = round3(clamp(e.thresholds.ChoiceActConfidence, 0.70, 0.95))
+		e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin, 0.70, 0.95))
+		e.metrics.RecommendedComposite = round3(clamp(e.thresholds.CompositePassScore, 50, 90))
+	}
+	if e.metrics.HallucinationsCaught > 0 {
+		e.metrics.RecommendedVerifyMin = round3(clamp(e.thresholds.CascadeVerifyMin+0.02, 0.70, 0.95))
+	}
+
 	e.history = append([]EvaluationOutcome{o}, e.history...)
-	if len(e.history) > 20 {
-		e.history = e.history[:20]
+	if len(e.history) > historyLimit {
+		e.history = e.history[:historyLimit]
 	}
 }
 
-// simulateCalibratedJevResponse produces a realistic, calibrated typesafe.SystemOneResponse
-// based on inspecting the input state when running locally without a live network call.
-func simulateCalibratedJevResponse(pipeline PipelineID, state any) *typesafe.SystemOneResponse {
-	rawJSON, _ := json.Marshal(state)
-	lower := strings.ToLower(string(rawJSON))
-
-	// Detect signals in state
-	hasInjection := strings.Contains(lower, "ignore previous") || strings.Contains(lower, "system override") || strings.Contains(lower, "dan") || strings.Contains(lower, "collector.example")
-	hasCredLeak := strings.Contains(lower, "sensitive_credentials") || strings.Contains(lower, "api key") || strings.Contains(lower, "password")
-	hasHallucinatedDate := strings.Contains(lower, "09/15/2026") && strings.Contains(lower, "thirty (30) days prior")
-	hasDuplicateRefund := strings.Contains(lower, "charged twice") && strings.Contains(lower, "captured")
-
-	jailbreakP := 0.03
-	ragInjP := 0.02
-	credP := 0.04
-	harmScore := 0.15
-	harmProbs := map[string]float64{"0": 0.86, "1": 0.13, "2": 0.01}
-
-	if hasInjection {
-		jailbreakP = 0.94
-		ragInjP = 0.98
-		harmScore = 1.91
-		harmProbs = map[string]float64{"0": 0.01, "1": 0.07, "2": 0.92}
+func sanitizeLiveError(err error) string {
+	if err == nil {
+		return ""
 	}
-	if hasCredLeak {
-		credP = 0.91
+	msg := err.Error()
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	if len(msg) > 280 {
+		msg = msg[:280] + "…"
 	}
+	return msg
+}
 
-	citationChoice := "verbatim_supported"
-	citationConf := 0.91
-	citationProbs := map[string]float64{"verbatim_supported": 0.93, "extrapolated": 0.04, "contradicted": 0.02, "unverifiable": 0.01}
-	verbatimP := 0.95
-
-	if hasHallucinatedDate {
-		citationChoice = "extrapolated"
-		citationConf = 0.87
-		citationProbs = map[string]float64{"verbatim_supported": 0.06, "extrapolated": 0.88, "contradicted": 0.05, "unverifiable": 0.01}
-		verbatimP = 0.08
-	}
-
-	execTier := "tier1_fast_mini"
-	execConf := 0.89
-	execProbs := map[string]float64{"tier0_deterministic": 0.05, "tier1_fast_mini": 0.90, "tier2_frontier_reasoning": 0.04, "tier3_human_escalation": 0.01}
-	skill := "none_needed"
-	skillConf := 0.88
-	skillProbs := map[string]float64{"none_needed": 0.89, "sql_analytics_ro": 0.03, "billing_refund_exec": 0.03, "sec_edgar_verifier": 0.03, "incident_pager_alert": 0.02}
-
-	refundP := 0.12
-	urgencyScore := 0.65
-	urgencyProbs := map[string]float64{"0": 0.45, "1": 0.45, "2": 0.10}
-
-	if hasDuplicateRefund {
-		execTier = "tier0_deterministic"
-		execConf = 0.93
-		execProbs = map[string]float64{"tier0_deterministic": 0.94, "tier1_fast_mini": 0.04, "tier2_frontier_reasoning": 0.01, "tier3_human_escalation": 0.01}
-		skill = "billing_refund_exec"
-		skillConf = 0.94
-		skillProbs = map[string]float64{"none_needed": 0.02, "sql_analytics_ro": 0.01, "billing_refund_exec": 0.95, "sec_edgar_verifier": 0.01, "incident_pager_alert": 0.01}
-		refundP = 0.97
-		urgencyScore = 1.55
-		urgencyProbs = map[string]float64{"0": 0.05, "1": 0.35, "2": 0.60}
-	} else if hasHallucinatedDate {
-		execTier = "tier2_frontier_reasoning"
-		execConf = 0.86
-		execProbs = map[string]float64{"tier0_deterministic": 0.02, "tier1_fast_mini": 0.08, "tier2_frontier_reasoning": 0.87, "tier3_human_escalation": 0.03}
-		skill = "sec_edgar_verifier"
-		skillConf = 0.84
-		skillProbs = map[string]float64{"none_needed": 0.06, "sql_analytics_ro": 0.04, "billing_refund_exec": 0.02, "sec_edgar_verifier": 0.86, "incident_pager_alert": 0.02}
-	} else if hasInjection {
-		execTier = "tier0_deterministic"
-		execConf = 0.96
-		execProbs = map[string]float64{"tier0_deterministic": 0.96, "tier1_fast_mini": 0.01, "tier2_frontier_reasoning": 0.01, "tier3_human_escalation": 0.02}
-	}
-
-	inTok := maxInt(len(rawJSON)/3+320, 480)
-	outTok := 64
-
-	return &typesafe.SystemOneResponse{
-		Model:     "jev-1.13.0",
-		RequestID: "req_jev_sim_" + time.Now().Format("150405"),
-		Usage: typesafe.Usage{
-			InputTokens:  &inTok,
-			OutputTokens: &outTok,
-		},
-		Nouls: map[string]typesafe.NoulResponse{
-			"jailbreak_attempt":          {Type: "noul", Noul: jailbreakP},
-			"indirect_prompt_injection":  {Type: "noul", Noul: ragInjP},
-			"credential_or_pii_exposure": {Type: "noul", Noul: credP},
-			"extraction_verbatim_match":  {Type: "noul", Noul: verbatimP},
-			"answers_user_intent":        {Type: "noul", Noul: 0.93},
-			"refund_policy_eligible":     {Type: "noul", Noul: refundP},
-		},
-		Choices: map[string]typesafe.ChoiceResponse[string]{
-			"execution_tier":       {Type: "choice", Choice: execTier, Confidence: execConf, Probabilities: execProbs},
-			"selected_agent_skill": {Type: "choice", Choice: skill, Confidence: skillConf, Probabilities: skillProbs},
-			"citation_grounding":   {Type: "choice", Choice: citationChoice, Confidence: citationConf, Probabilities: citationProbs},
-		},
-		Scores: map[string]typesafe.ScoreResponse{
-			"policy_harm_severity":   {Type: "score", Score: harmScore, Confidence: 0.91, Probabilities: harmProbs},
-			"customer_urgency_score": {Type: "score", Score: urgencyScore, Confidence: 0.84, Probabilities: urgencyProbs},
-		},
-	}
+func clamp(v, lo, hi float64) float64 {
+	return math.Min(hi, math.Max(lo, v))
 }
 
 func round3(v float64) float64 {
 	return math.Round(v*1000) / 1000
-}
-
-func formatFloat(v float64) string {
-	b, _ := json.Marshal(round3(v))
-	return string(b)
 }
 
 func maxInt(a, b int) int {
