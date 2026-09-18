@@ -32,9 +32,19 @@ Live Jev (optional):
 TYPESAFE_API_KEY="ts_live_..." go run .
 ```
 
-If the live call fails, the UI says so and falls back to the simulator. The key stays in process memory.
+If the live call fails, the UI says so and falls back to the simulator. Locally the key stays in process memory.
 
-Bind address must be loopback (`AEGIS_ADDR` defaults to `127.0.0.1:8090`).
+Local bind must be loopback (`AEGIS_ADDR` defaults to `127.0.0.1:8090`). On Vercel the server listens on `PORT`.
+
+## Deploy on Vercel
+
+This is a **Go Framework Preset** app: root `go.mod` + `main.go`. `vercel.json` sets `"framework": "go"`.
+
+1. Import the GitHub repo in Vercel (Framework Preset: **Go**) or run `npx vercel` from the repo root.
+2. Optional: add `TYPESAFE_API_KEY` under Project Settings → Environment Variables (Production and Preview). The browser “Hold in memory” form is disabled on Vercel so visitors cannot plant a key on a shared instance.
+3. Deploy. Simulator mode works with no env vars.
+
+This hosted studio is a **demo**, not a production control plane. See “Production readiness” below.
 
 ## Scenarios
 
@@ -54,7 +64,21 @@ Edit the JSON and re-run. Changing the payload changes the route.
 | `GET` | `/api/state` | Presets, thresholds, flywheel |
 | `POST` | `/api/evaluate` | `{ "scenario_id", "context" }` |
 | `POST` | `/api/thresholds` | Slider gates, including composite score |
-| `POST` | `/api/key` | In-memory TypeSafe key |
+| `POST` | `/api/key` | In-memory TypeSafe key (local only; 403 on Vercel) |
+
+## Production readiness
+
+**Not production-ready as a gateway.** It is a loopback / hosted workbench.
+
+| Ready | Not ready |
+| :--- | :--- |
+| Honest routing from the payload | No operator auth on the public studio |
+| Self-contained Go binary / Vercel Go preset | In-memory thresholds, flywheel, and history (lost on cold start; racy across isolates) |
+| CSP / XFO / loopback-only local bind | Does not execute refunds or call Mini/Frontier |
+| Live Jev with env-var key | No durable store, no rate limits, no multi-tenant isolation |
+| Tests on payload content | Flywheel ECE is an in-process estimate, not a published benchmark |
+
+Use it to demo and calibrate. To run in front of real agents, extract `CortexEngine.Evaluate` behind auth, persist gates, and execute routes in your own gateway.
 
 ## Notes
 
