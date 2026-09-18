@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -86,7 +87,9 @@ func buildSurgicalPatch(state any, failed []string, fieldViews []FieldVerificati
 		failedSet[strings.ToLower(fv.FieldName)] = true
 	}
 
-	for key, before := range locked {
+	lockKeys := sortedKeys(locked)
+	for _, key := range lockKeys {
+		before := locked[key]
 		if lockedNames[strings.ToLower(key)] {
 			continue
 		}
@@ -174,10 +177,23 @@ func microRepairPrompt(source string, failed []string, patches []FieldPatch) str
 		clip = clip[:180] + "…"
 	}
 	target := strings.Join(failed, ", ")
-	if len(patches) > 0 {
-		target = patches[0].Field
+	if target == "" && len(patches) > 0 {
+		names := make([]string, 0, len(patches))
+		for _, p := range patches {
+			names = append(names, p.Field)
+		}
+		target = strings.Join(names, ", ")
 	}
 	return fmt.Sprintf("Given %q, compute only %s. Do not regenerate locked fields.", clip, target)
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func patchCovers(patches []FieldPatch, name string) bool {

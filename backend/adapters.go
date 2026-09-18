@@ -254,13 +254,7 @@ func (e *CortexEngine) EvaluateRequest(ctx context.Context, req EvaluationReques
 
 	var gates *GateThresholds
 	if req.Thresholds != nil {
-		g := GateThresholds{
-			GuardrailBlockProb:  req.Thresholds.SecurityGateConfidence,
-			CascadeVerifyMin:    req.Thresholds.FieldVerifyConfidence,
-			ChoiceActConfidence: req.Thresholds.RouterConfidence,
-			ReviewMinConfidence: 0.50,
-			CompositePassScore:  req.Thresholds.CompositePassThreshold,
-		}
+		g := mergeInlineThresholds(e.snapshotThresholds(), req.Thresholds)
 		gates = &g
 	}
 
@@ -393,6 +387,28 @@ func extractionNeedle(ext map[string]any, fieldName string) string {
 		return notice
 	}
 	return other
+}
+
+func mergeInlineThresholds(base GateThresholds, t *PipelineThresholds) GateThresholds {
+	if t == nil {
+		return base
+	}
+	if t.SecurityGateConfidence > 0 && t.SecurityGateConfidence <= 1 {
+		base.GuardrailBlockProb = t.SecurityGateConfidence
+	}
+	if t.FieldVerifyConfidence > 0 && t.FieldVerifyConfidence <= 1 {
+		base.CascadeVerifyMin = t.FieldVerifyConfidence
+	}
+	if t.RouterConfidence > 0 && t.RouterConfidence <= 1 {
+		base.ChoiceActConfidence = t.RouterConfidence
+	}
+	if t.CompositePassThreshold >= 30 && t.CompositePassThreshold <= 100 {
+		base.CompositePassScore = t.CompositePassThreshold
+	}
+	if base.ReviewMinConfidence == 0 {
+		base.ReviewMinConfidence = 0.50
+	}
+	return base
 }
 
 func scorerName(mode string) string {

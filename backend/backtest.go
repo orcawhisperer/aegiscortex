@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const maxBacktestTurns = 500
+
 // BacktestRequest is POST /api/backtest.
 type BacktestRequest struct {
 	JSONL         string              `json:"jsonl"`
@@ -55,11 +57,26 @@ func parseJSONLTurns(raw string) []EvaluationRequest {
 	return out
 }
 
+func clampBacktestCount(n int) int {
+	if n <= 0 {
+		return 50
+	}
+	if n > maxBacktestTurns {
+		return maxBacktestTurns
+	}
+	return n
+}
+
+func clampTurnList(turns []EvaluationRequest) []EvaluationRequest {
+	if len(turns) > maxBacktestTurns {
+		return turns[:maxBacktestTurns]
+	}
+	return turns
+}
+
 func syntheticTurns(n int) []EvaluationRequest {
 	presets := DefaultPresets()
-	if n <= 0 {
-		n = 50
-	}
+	n = clampBacktestCount(n)
 	out := make([]EvaluationRequest, 0, n)
 	for i := 0; i < n; i++ {
 		p := presets[i%len(presets)]
@@ -83,8 +100,18 @@ func (e *CortexEngine) RunBacktest(ctx context.Context, req BacktestRequest) (Ba
 		if n <= 0 {
 			n = 50
 		}
-		turns = append(turns, syntheticTurns(n)...)
+		room := maxBacktestTurns - len(turns)
+		if room < 0 {
+			room = 0
+		}
+		if n > room {
+			n = room
+		}
+		if n > 0 {
+			turns = append(turns, syntheticTurns(n)...)
+		}
 	}
+	turns = clampTurnList(turns)
 	vol := req.MonthlyVolume
 	if vol <= 0 {
 		vol = 10_000_000
@@ -96,6 +123,7 @@ func (e *CortexEngine) RunBacktest(ctx context.Context, req BacktestRequest) (Ba
 	sumBase := 0.0
 	labeled := 0
 	matches := 0
+	completed := 0
 
 	for _, turn := range turns {
 		turn.ReadOnly = true
@@ -106,6 +134,7 @@ func (e *CortexEngine) RunBacktest(ctx context.Context, req BacktestRequest) (Ba
 		if err != nil {
 			continue
 		}
+		completed++
 		counts[res.FinalRouteTier]++
 		sumAegis += res.Cascade.AegisBlendedCostUSD
 		sumBase += res.Cascade.NaiveFrontierCostUSD
@@ -119,7 +148,7 @@ func (e *CortexEngine) RunBacktest(ctx context.Context, req BacktestRequest) (Ba
 		}
 	}
 
-	n := len(turns)
+	n := completed
 	if n == 0 {
 		return BacktestReport{MonthlyVolume: vol}, nil
 	}

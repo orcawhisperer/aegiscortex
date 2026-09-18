@@ -33,18 +33,27 @@ assert.strictEqual(
   ).final_route_tier,
   "TIER_1_VERIFIED_FASTPATH"
 );
-assert.strictEqual(
-  replayRuling(
-    {
-      ...base,
-      questions: base.questions.map((q) =>
-        q.id === "indirect_prompt_injection" ? { ...q, top_probability: 0.97 } : q
-      ),
-    },
-    tau
-  ).final_route_tier,
-  "TIER_0_BLOCK"
+const blockedReplay = replayRuling(
+  {
+    ...base,
+    cascade: { aegis_control_cost_usd: 0.00004, naive_frontier_cost_usd: 0.0384 },
+    questions: base.questions.map((q) =>
+      q.id === "indirect_prompt_injection" ? { ...q, top_probability: 0.97 } : q
+    ),
+  },
+  tau
 );
+assert.strictEqual(blockedReplay.final_route_tier, "TIER_0_BLOCK");
+assert.ok(blockedReplay.final_decision.includes("Blocked before generation"));
+assert.ok(blockedReplay.cascade.aegis_blended_cost_usd < 0.001);
+assert.ok(blockedReplay.questions.find((q) => q.id === "indirect_prompt_injection").route_reason.includes("BLOCK"));
+
+const locked = replayRuling(
+  { ...base, field_verifications: base.field_verifications.map((f) => ({ ...f, yes_prob: 0.96 })) },
+  tau
+);
+assert.ok(locked.final_decision.includes("All field nouls locked"));
+assert.ok(locked.cascade.cost_savings_percent > 90);
 
 const blocked = raceModel("TIER_0_BLOCK");
 assert.strictEqual(blocked.abortAt, 114);

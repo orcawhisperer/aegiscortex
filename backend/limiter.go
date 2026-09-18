@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxLimiterIdentities = 4096
+
 type ipLimiter struct {
 	mu   sync.Mutex
 	hits map[string][]time.Time
@@ -25,6 +27,9 @@ func (l *ipLimiter) allow(ip string, n int, window time.Duration) bool {
 	cutoff := now.Add(-window)
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if _, exists := l.hits[ip]; !exists {
+		l.evictIfNeededLocked(cutoff)
+	}
 	kept := l.hits[ip][:0]
 	for _, t := range l.hits[ip] {
 		if t.After(cutoff) {
@@ -39,9 +44,34 @@ func (l *ipLimiter) allow(ip string, n int, window time.Duration) bool {
 	return true
 }
 
-func requestIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+func (l *ipLimiter) evictIfNeededLocked(cutoff time.Time) {
+	if len(l.hits) < maxLimiterIdentities {
+		return
+	}
+	for k, ts := range l.hits {
+		stale := true
+		for _, t := range ts {
+			if t.After(cutoff) {
+				stale = false
+				break
+			}
+		}
+		if stale {
+			delete(l.hits, k)
+			if len(l.hits) < maxLimiterIdentities {
+				return
+			}
+		}
+	}
+	for k := range l.hits {
+		delete(l.hits, k)
+		return
+	}
+}
+
+func socketIP(r *http.Request) string {
+	if r == nil {
+		return ""
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -50,13 +80,24 @@ func requestIP(r *http.Request) string {
 	return host
 }
 
+// requestIP is the rate-limit identity. On Vercel the platform sets
+// X-Forwarded-For; anywhere else the socket peer is the only trusted source.
+func requestIP(r *http.Request) string {
+	if HostedOnVercel() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.Split(xff, ",")[0])
+		}
+	}
+	return socketIP(r)
+}
+
 func isLoopbackIP(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
 func isLoopbackRemote(r *http.Request) bool {
-	return isLoopbackIP(requestIP(r))
+	return isLoopbackIP(socketIP(r))
 }
 
 func listenIsLoopback(addr string) bool {
@@ -80,7 +121,7 @@ func allowBrowserKeyHold(r *http.Request) bool {
 	if HostedOnVercel() {
 		return false
 	}
-	if !listenIsLoopback(ResolvedListen()) && !isLoopbackRemote(r) {
+	if !listenIsLoopback(ResolvedListen()) {
 		return false
 	}
 	return isLoopbackRemote(r)

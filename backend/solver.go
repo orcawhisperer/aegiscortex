@@ -1,6 +1,7 @@
 package aegiscortex
 
 import (
+	"context"
 	"math"
 	"time"
 )
@@ -227,7 +228,34 @@ func SolveGates(turns []LabeledTurn, maxEscapeRate float64) (SolvedGates, bool) 
 	return best, found
 }
 
+func (e *CortexEngine) seedLabeledPresets(ctx context.Context) {
+	if len(e.snapshotLabels()) > 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, p := range DefaultPresets() {
+		outcome, err := e.evaluate(ctx, evaluateOpts{
+			Pipeline:     p.Pipeline,
+			State:        p.State,
+			PreferLive:   false,
+			ReadOnly:     true,
+			ScenarioID:   p.ID,
+			ExpectedTier: presetWantTier[p.ID],
+		})
+		if err != nil || outcome == nil {
+			continue
+		}
+		want := presetWantTier[p.ID]
+		e.rememberTurn(labelFromOutcome(p.ID, want, outcome))
+	}
+}
+
 func (e *CortexEngine) solveAndRecommend(maxEscapeRate float64) (SolvedGates, bool) {
+	if len(e.snapshotLabels()) == 0 {
+		e.seedLabeledPresets(context.Background())
+	}
 	turns := e.snapshotLabels()
 	solved, ok := SolveGates(turns, maxEscapeRate)
 	if !ok {

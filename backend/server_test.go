@@ -468,10 +468,14 @@ func TestRejectPlainTextPOSTAndPublicKey(t *testing.T) {
 	keyReq := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(`{"api_key":"x"}`))
 	keyReq.Header.Set("Content-Type", "application/json")
 	keyReq.RemoteAddr = "203.0.113.9:4400"
+	keyReq.Header.Set("X-Forwarded-For", "127.0.0.1")
 	keyRec := httptest.NewRecorder()
 	handler.ServeHTTP(keyRec, keyReq)
 	if keyRec.Code != http.StatusForbidden {
 		t.Fatalf("public bind /api/key = %d %s", keyRec.Code, keyRec.Body.String())
+	}
+	if engine.HasAPIKey() {
+		t.Fatal("spoofed X-Forwarded-For must not unlock /api/key")
 	}
 }
 
@@ -509,6 +513,9 @@ func TestInferExtraFieldsAndBacktest(t *testing.T) {
 	if len(extra) < 2 {
 		t.Fatalf("expected extra fields for governing_law / payment_terms, got %+v", extra)
 	}
+	if extra[0].Name != "governing_law" || extra[1].Name != "payment_terms_days" {
+		t.Fatalf("extra fields should be sorted, got %+v", extra)
+	}
 	engine := NewCortexEngineWithKey("")
 	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{Context: ctx})
 	if err != nil {
@@ -527,6 +534,87 @@ func TestInferExtraFieldsAndBacktest(t *testing.T) {
 	}
 	if report.MonthlyBaselineUSD <= report.MonthlyAegisUSD {
 		t.Fatalf("expected modeled monthly savings: %+v", report)
+	}
+}
+
+func TestSpoofedXFFCannotHoldKeyOnPublicBind(t *testing.T) {
+	t.Setenv("PORT", "8090")
+	t.Setenv("VERCEL", "")
+	t.Setenv("VERCEL_ENV", "")
+	t.Setenv("VERCEL_URL", "")
+	t.Setenv("VERCEL_REGION", "")
+	if allowBrowserKeyHold(&http.Request{
+		RemoteAddr: "203.0.113.9:9",
+		Header:     http.Header{"X-Forwarded-For": []string{"127.0.0.1"}},
+	}) {
+		t.Fatal("X-Forwarded-For must not satisfy loopback key-hold on :PORT")
+	}
+	t.Setenv("PORT", "")
+	t.Setenv("AEGIS_ADDR", "127.0.0.1:8090")
+	if !allowBrowserKeyHold(&http.Request{RemoteAddr: "127.0.0.1:4400"}) {
+		t.Fatal("loopback listen + loopback peer should allow key hold")
+	}
+	if allowBrowserKeyHold(&http.Request{
+		RemoteAddr: "203.0.113.9:9",
+		Header:     http.Header{"X-Forwarded-For": []string{"127.0.0.1"}},
+	}) {
+		t.Fatal("loopback listen still requires a loopback socket peer")
+	}
+}
+
+func TestPartialEvaluateThresholdsKeepDefaults(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	preset, _ := presetByID("rag_verified_fastpath")
+	res, err := engine.EvaluateRequest(context.Background(), EvaluationRequest{
+		ScenarioID: "rag_verified_fastpath",
+		Context:    preset.State,
+		Thresholds: &PipelineThresholds{FieldVerifyConfidence: 0.75},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FinalRouteTier != "TIER_1_VERIFIED_FASTPATH" {
+		t.Fatalf("omitted composite/field τ zeroed the fast path: %s", res.FinalRouteTier)
+	}
+}
+
+func TestCalibrateAutoSeedsPresets(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	handler, err := NewServerHandler(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/calibrate", strings.NewReader(`{"max_escape_rate":0.001}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cold calibrate = %d %s", rec.Code, rec.Body.String())
+	}
+	if engine.GetFlywheel().DistilledGoldenExamples != 0 {
+		t.Fatalf("auto-seed must stay read-only, flywheel=%+v", engine.GetFlywheel())
+	}
+	solved, ok := engine.solveAndRecommend(0.001)
+	if !ok || solved.Samples < 4 {
+		t.Fatalf("seeded solver = %+v ok=%v", solved, ok)
+	}
+}
+
+func TestBacktestClampsSyntheticAndCompletedCount(t *testing.T) {
+	engine := NewCortexEngineWithKey("")
+	report, err := engine.RunBacktest(context.Background(), BacktestRequest{Synthetic: 50_000, MonthlyVolume: 10_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Turns != maxBacktestTurns {
+		t.Fatalf("synthetic clamp = %d want %d", report.Turns, maxBacktestTurns)
+	}
+}
+
+func TestMicroPromptKeepsAllFailedFields(t *testing.T) {
+	got := microRepairPrompt("source", []string{"notice_deadline_date", "governing_law"}, nil)
+	if !strings.Contains(got, "notice_deadline_date") || !strings.Contains(got, "governing_law") {
+		t.Fatalf("micro-prompt dropped a failed field: %s", got)
 	}
 }
 

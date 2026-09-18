@@ -229,6 +229,8 @@ Public routes after deploy:
 
 **Not production-ready as a gateway.** It is a demo workbench.
 
-No operator auth. Gates, flywheel, and history are in-memory (per instance). Downstream Mini / Frontier cost is modeled, not executed. Live evaluate is rate-limited at 20/min per IP. CSRF on POST is content-type + `Sec-Fetch-Site` only.
+No operator auth. Gates, flywheel, and history are in-memory (per instance). Downstream Mini / Frontier cost is modeled, not executed. Live evaluate is rate-limited at 20/min per IP (socket peer off-Vercel; platform `X-Forwarded-For` only on Vercel). `/api/key` requires a loopback listen **and** a loopback `RemoteAddr` — spoofed `X-Forwarded-For` does not unlock it. `POST /backtest` clamps to 500 turns. CSRF on POST is content-type + `Sec-Fetch-Site` only.
+
+**Solve τ** auto-seeds the four presets as read-only labeled turns on a cold instance. Slider replay recomputes the lede, cascade, and `route_reason` at 0 ms; click **Evaluate** to splice a newly failed field.
 
 Use it to demo and calibrate. Wire `Evaluate` behind your own gateway for real agents.
