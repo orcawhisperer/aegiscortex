@@ -4,7 +4,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -36,22 +35,23 @@ func main() {
 }
 
 func registerRoutes(router *gin.Engine, engine *aegis.CortexEngine, api http.Handler) {
+	// Gin forbids mixing /svc/api/status with /svc/api/*path. Mount each
+	// public path explicitly and proxy into the stdlib API mux.
 	router.GET("/svc/api", statusHandler(engine))
 	router.GET("/svc/api/status", statusHandler(engine))
-	router.Any("/svc/api/*path", func(c *gin.Context) {
-		if c.Request.URL.Path == "/svc/api/status" || c.Request.URL.Path == "/svc/api" {
-			statusHandler(engine)(c)
-			return
-		}
+	router.GET("/svc/api/healthz", proxy(api, "/healthz"))
+	router.GET("/svc/api/state", proxy(api, "/api/state"))
+	router.POST("/svc/api/evaluate", proxy(api, "/api/evaluate"))
+	router.POST("/svc/api/thresholds", proxy(api, "/api/thresholds"))
+	router.POST("/svc/api/key", proxy(api, "/api/key"))
+}
+
+func proxy(api http.Handler, path string) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		req := c.Request.Clone(c.Request.Context())
-		suffix := strings.TrimPrefix(c.Request.URL.Path, "/svc/api")
-		if suffix == "" || suffix == "/" {
-			req.URL.Path = "/healthz"
-		} else {
-			req.URL.Path = "/api" + suffix
-		}
+		req.URL.Path = path
 		api.ServeHTTP(c.Writer, req)
-	})
+	}
 }
 
 func statusHandler(engine *aegis.CortexEngine) gin.HandlerFunc {
